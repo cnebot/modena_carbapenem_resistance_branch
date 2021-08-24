@@ -1,0 +1,88 @@
+---
+title: "Bloodstream infections and associated mortality from CROs in Modena"
+output:
+  word_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+# Introduction
+This R notebook provides implementation codes for replicating data processing and analysis for examination of bloodstream infections (BSI) due to carbapenem resistant organisms (CROs) and equivalent carbapenem sensitivity pathogens, and competing risks of hospital stay and death
+
+
+# 1. Preliminaries
+
+## 1.1 Load essential packages
+```{r, message = FALSE}
+library(tidyverse)
+library(openxlsx)
+library(devtools)
+install.packages("devtools")
+library(icd)
+```
+
+## 1.2 Load and process data
+```{r, message = FALSE}
+bsi_mort <- read_csv("bsi_mort.csv")
+
+
+.. cols(
+  ..   pt_id = col_double(),
+  ..   sex = col_character(),
+  ..   dob...3 = col_character(),
+  ..   age = col_double(),
+  ..   Differenza_Prel_Ricov = col_double(),
+  ..   ING_DEG = col_character(),
+  ..   ING_DEG_2 = col_character(),
+  ..   speciality = col_character(),
+  ..   directorate = col_character(),
+  ..   ...10 = col_logical(),
+  ..   type = col_character(),
+  ..   Pathogen = col_character(),
+  ..   carba_resistant = col_double(),
+  ..   count = col_double(),
+  ..   admit_id = col_double(),
+  ..   year = col_double(),
+  ..   month = col_double(),
+  ..   study_month = col_double(),
+  ..   los = col_double(),
+  ..   death = col_double(),
+  ..   `ICD-10-CM Diagnosis Codes` = col_character(),
+  ..   description = col_character(),
+  ..   order = col_double(),
+  ..   dob...24 = col_character(),
+  ..   dataric = col_character(),
+  ..   sample_date = col_character(),
+  ..   dc_date = col_character(),
+  ..   date_death = col_character(),
+  ..   days_admit_sample = col_double(),
+  ..   ...30 = col_double(),
+  ..   diff = col_double()
+  .. )
+
+  ..   ING_DEG = col_character(),
+  ..   ING_DEG_2 = col_character(),
+  ..   Department = col_character(),
+  ..   sample_type = col_character(),
+  ..   Pathogen = col_character(),
+  ..   contatore = col_double(),
+  ..   IDadm = col_double(),
+  ..   IdPaz = col_double(),
+  ..   admcode = col_double(),
+  ..   dataric = col_datetime(format = ""),
+  ..   DataDecesso = col_datetime(format = ""),
+  ..   DimessoDecesso = col_character(),
+  ..   DataDim = col_datetime(format = "%Y-%m-%d  %H:%M:%S"),
+  ..   DurataRicovero = col_double(),
+  ..   `ICD-10-CM Diagnosis Codes...23` = col_character(),
+  ..   description = col_character(),
+  ..   order = col_double()
+  .. )
+```
