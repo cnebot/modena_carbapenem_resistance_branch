@@ -1,0 +1,49 @@
+speciality,directorate,period,adherence
+Internal medicine critical care,critical care,0,0.31
+ICU,critical care,0,0.31
+Transplant surgery,haemoncology and transplant,0,0.44
+Haematology,haemoncology and transplant,0,0.615
+Medical oncology,haemoncology and transplant,0,0.295
+Neonatology,maternal and child,0,0.52
+Obstetrics & Gynaecology,maternal and child,0,0.1
+Respiratory medicine HDU,medical HDU,0,0.45
+Nephrology (with HDU),medical HDU,0,0.375
+Infectious diseases,medicine,0,0.51
+General medicine,medicine,0,0.36
+Respiratory medicine,medicine,0,0.35
+Gastroenterology,medicine,0,0.35
+Urology,surgery,0,0.25
+Plastic surgery,surgery,0,0.29
+Orthopaedics,surgery,0,0.41
+Internal medicine critical care,critical care,1,0.74
+ICU,critical care,1,0.73
+Transplant surgery,haemoncology and transplant,1,0.63
+Haematology,haemoncology and transplant,1,0.86
+Medical oncology,haemoncology and transplant,1,0.735
+Neonatology,maternal and child,1,0.8
+Obstetrics & Gynaecology,maternal and child,1,0.715
+Respiratory medicine HDU,medical HDU,1,0.65
+Nephrology (with HDU),medical HDU,1,0.63
+Infectious diseases,medicine,1,0.82
+General medicine,medicine,1,0.81
+Respiratory medicine,medicine,1,0.66
+Gastroenterology,medicine,1,0.8
+Urology,surgery,1,0.84
+Plastic surgery,surgery,1,0.57
+Orthopaedics,surgery,1,0.65
+Internal medicine critical care,critical care,2,0.78
+ICU,critical care,2,0.73
+Transplant surgery,haemoncology and transplant,2,0.85
+Haematology,haemoncology and transplant,2,0.78
+Medical oncology,haemoncology and transplant,2,0.45
+Neonatology,maternal and child,2,0.84
+Obstetrics & Gynaecology,maternal and child,2,NA
+Respiratory medicine HDU,medical HDU,2,0.68
+Nephrology (with HDU),medical HDU,2,0.65
+Infectious diseases,medicine,2,0.55
+General medicine,medicine,2,NA
+Respiratory medicine,medicine,2,0.74
+Gastroenterology,medicine,2,NA
+Urology,surgery,2,0.84
+Plastic surgery,surgery,2,NA
+Orthopaedics,surgery,2,NA
