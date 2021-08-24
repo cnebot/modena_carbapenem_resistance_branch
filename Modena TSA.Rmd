@@ -55,14 +55,16 @@ library(lattice)
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data
-main <- read_csv ("modena_carbresist.csv",
+main <- read_csv ("modena_maindata.csv",
                   show_col_types = FALSE)
 
-# Get incidence of infections and colonisations (per 10 000 OBDs) 
-# Function for std antibiotic use measure (DDDs per 1000 OBDs)
+# Get incidence of infections and colonisations (per 10 000 OBDs)
+main2 <- main %>% mutate(across(
+  ecoli_ccs_bsi:crpa_co_hca_adm_swab,~./obd*10000))
 
 
-
+# Function for standardised antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
+main2 <- main2 %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
 
 ```
 
