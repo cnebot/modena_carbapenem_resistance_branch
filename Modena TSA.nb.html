@@ -291,8 +291,71 @@ div.tocify {
 
 
 <!-- rnb-text-begin -->
-<p>This is an <a href="http://rmarkdown.rstudio.com">R Markdown</a> Notebook. When you execute code within the notebook, the results appear beneath the code.</p>
-<p>Try executing this chunk by clicking the <em>Run</em> button within the chunk or by placing your cursor inside it and pressing <em>Ctrl+Shift+Enter</em>.</p>
+<div id="introduction" class="section level1">
+<h1>Introduction</h1>
+<p>This R notebook provides code to reproduce results for the paper <em>Effects of antimicrobial stewardship and infection prevention and control on the incidence of carbapenem resistant gram-negative infections in Modena, Italy: a non-linear time-series analysis</em>. It requires installing of necessary packages</p>
+<p>Data and code are available at the Github repository <a href="https://github.com/TimLawes/modena_carbapenem_resistance">via this link</a></p>
+</div>
+<div id="preliminaries" class="section level1">
+<h1>1. Preliminaries</h1>
+<div id="install-copies-of-required-packages-to-private-library" class="section level2">
+<h2>1.1 Install copies of required packages to private library</h2>
+<!-- rnb-text-end -->
+<!-- rnb-chunk-begin -->
+<!-- rnb-source-begin eyJkYXRhIjoiYGBgclxuIyBJbnN0YWxsIHJlbnYgZm9yIHByaXZhdGUgcGFja2FnZSBsaWJyYXJ5IGlmIG5vdCBhdmFpbGFibGVcbmlmKCFyZXF1aXJlKHJlbnYpKXtcbiAgICBpbnN0YWxsLnBhY2thZ2VzKFwicmVudlwiKVxuICAgIGxpYnJhcnkocmVudilcbn1cbnJlbnY6OnJlc3RvcmUoKVxuYGBgIn0= -->
+<pre class="r"><code># Install renv for private package library if not available
+if(!require(renv)){
+    install.packages(&quot;renv&quot;)
+    library(renv)
+}
+renv::restore()</code></pre>
+<!-- rnb-source-end -->
+<!-- rnb-output-begin eyJkYXRhIjoiKiBUaGUgbGlicmFyeSBpcyBhbHJlYWR5IHN5bmNocm9uaXplZCB3aXRoIHRoZSBsb2NrZmlsZS5cbiJ9 -->
+<pre><code>* The library is already synchronized with the lockfile.</code></pre>
+<!-- rnb-output-end -->
+<!-- rnb-chunk-end -->
+<!-- rnb-text-begin -->
+</div>
+<div id="load-required-packages-and-customised-plot-theme" class="section level2">
+<h2>1.2 Load required packages and customised plot theme</h2>
+<!-- rnb-text-end -->
+<!-- rnb-chunk-begin -->
+<!-- rnb-source-begin eyJkYXRhIjoiYGBgclxubGlicmFyeSh0aWR5dmVyc2UpICMgdG8gZW5hYmxlIHRpZHl2ZXJzZSBmdW5jdGlvbnNcbmxpYnJhcnkoZWFydGgpICMgZm9yIE1BUlNcbmBgYCJ9 -->
+<pre class="r"><code>library(tidyverse) # to enable tidyverse functions
+library(earth) # for MARS</code></pre>
+<!-- rnb-source-end -->
+<!-- rnb-chunk-end -->
+<!-- rnb-text-begin -->
+</div>
+<div id="load-data-and-process" class="section level2">
+<h2>1.3 Load data and process</h2>
+<!-- rnb-text-end -->
+<!-- rnb-chunk-begin -->
+<!-- rnb-source-begin eyJkYXRhIjoiYGBgclxubWFpbiA8LSByZWFkX2NzdlxuYGBgIn0= -->
+<pre class="r"><code>main &lt;- read_csv</code></pre>
+<!-- rnb-source-end -->
+<!-- rnb-chunk-end -->
+<!-- rnb-text-begin -->
+</div>
+<div id="outlier-detection-and-time-series-cleaning" class="section level2">
+<h2>1.4 Outlier detection and time-series cleaning</h2>
+<!-- rnb-text-end -->
+<!-- rnb-chunk-begin -->
+<!-- rnb-chunk-end -->
+<!-- rnb-text-begin -->
+</div>
+</div>
+<div id="descriptives" class="section level1">
+<h1>2. Descriptives</h1>
+</div>
+<div id="vars" class="section level1">
+<h1>3. VARs</h1>
+</div>
+<div id="gams" class="section level1">
+<h1>4. GAMs</h1>
+</div>
+<div id="mars" class="section level1">
+<h1>5. MARS</h1>
 <!-- rnb-text-end -->
 <!-- rnb-chunk-begin -->
 <!-- rnb-source-begin eyJkYXRhIjoiYGBgclxucGxvdChjYXJzKVxuYGBgIn0= -->
@@ -300,12 +363,10 @@ div.tocify {
 <!-- rnb-source-end -->
 <!-- rnb-chunk-end -->
 <!-- rnb-text-begin -->
-<p>Add a new chunk by clicking the <em>Insert Chunk</em> button on the toolbar or by pressing <em>Ctrl+Alt+I</em>.</p>
-<p>When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the <em>Preview</em> button or press <em>Ctrl+Shift+K</em> to preview the HTML file).</p>
-<p>The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike <em>Knit</em>, <em>Preview</em> does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.</p>
 <!-- rnb-text-end -->
+</div>
 
-<div id="rmd-source-code">LS0tDQp0aXRsZTogIk1vZGVuYSBUaW1lIFNlcmllcyBBbmFseXNpcyINCm91dHB1dDoNCiAgd29yZF9kb2N1bWVudDoNCiAgICB0b2M6IHllcw0KICBodG1sX25vdGVib29rOg0KICAgIHRvYzogeWVzDQogICAgdG9jX2Zsb2F0OiB5ZXMNCiAgaHRtbF9kb2N1bWVudDoNCiAgICBkZl9wcmludDogcGFnZWQNCiAgICB0b2M6IHllcw0KICBwZGZfZG9jdW1lbnQ6DQogICAgdG9jOiB5ZXMNCi0tLQ0KDQpUaGlzIGlzIGFuIFtSIE1hcmtkb3duXShodHRwOi8vcm1hcmtkb3duLnJzdHVkaW8uY29tKSBOb3RlYm9vay4gV2hlbiB5b3UgZXhlY3V0ZSBjb2RlIHdpdGhpbiB0aGUgbm90ZWJvb2ssIHRoZSByZXN1bHRzIGFwcGVhciBiZW5lYXRoIHRoZSBjb2RlLiANCg0KVHJ5IGV4ZWN1dGluZyB0aGlzIGNodW5rIGJ5IGNsaWNraW5nIHRoZSAqUnVuKiBidXR0b24gd2l0aGluIHRoZSBjaHVuayBvciBieSBwbGFjaW5nIHlvdXIgY3Vyc29yIGluc2lkZSBpdCBhbmQgcHJlc3NpbmcgKkN0cmwrU2hpZnQrRW50ZXIqLiANCg0KYGBge3J9DQpwbG90KGNhcnMpDQpgYGANCg0KQWRkIGEgbmV3IGNodW5rIGJ5IGNsaWNraW5nIHRoZSAqSW5zZXJ0IENodW5rKiBidXR0b24gb24gdGhlIHRvb2xiYXIgb3IgYnkgcHJlc3NpbmcgKkN0cmwrQWx0K0kqLg0KDQpXaGVuIHlvdSBzYXZlIHRoZSBub3RlYm9vaywgYW4gSFRNTCBmaWxlIGNvbnRhaW5pbmcgdGhlIGNvZGUgYW5kIG91dHB1dCB3aWxsIGJlIHNhdmVkIGFsb25nc2lkZSBpdCAoY2xpY2sgdGhlICpQcmV2aWV3KiBidXR0b24gb3IgcHJlc3MgKkN0cmwrU2hpZnQrSyogdG8gcHJldmlldyB0aGUgSFRNTCBmaWxlKS4NCg0KVGhlIHByZXZpZXcgc2hvd3MgeW91IGEgcmVuZGVyZWQgSFRNTCBjb3B5IG9mIHRoZSBjb250ZW50cyBvZiB0aGUgZWRpdG9yLiBDb25zZXF1ZW50bHksIHVubGlrZSAqS25pdCosICpQcmV2aWV3KiBkb2VzIG5vdCBydW4gYW55IFIgY29kZSBjaHVua3MuIEluc3RlYWQsIHRoZSBvdXRwdXQgb2YgdGhlIGNodW5rIHdoZW4gaXQgd2FzIGxhc3QgcnVuIGluIHRoZSBlZGl0b3IgaXMgZGlzcGxheWVkLg0K</div>
+<div id="rmd-source-code">LS0tDQp0aXRsZTogIk1vZGVuYSBUaW1lIFNlcmllcyBBbmFseXNpcyINCm91dHB1dDoNCiAgaHRtbF9ub3RlYm9vazoNCiAgICB0b2M6IHllcw0KICAgIHRvY19mbG9hdDogeWVzDQogIHdvcmRfZG9jdW1lbnQ6DQogICAgdG9jOiB5ZXMNCiAgaHRtbF9kb2N1bWVudDoNCiAgICBkZl9wcmludDogcGFnZWQNCiAgICB0b2M6IHllcw0KICBwZGZfZG9jdW1lbnQ6DQogICAgdG9jOiB5ZXMNCi0tLQ0KDQojIEludHJvZHVjdGlvbg0KVGhpcyBSIG5vdGVib29rIHByb3ZpZGVzIGNvZGUgdG8gcmVwcm9kdWNlIHJlc3VsdHMgZm9yIHRoZSBwYXBlciAqRWZmZWN0cyBvZiBhbnRpbWljcm9iaWFsIHN0ZXdhcmRzaGlwIGFuZCBpbmZlY3Rpb24gcHJldmVudGlvbiBhbmQgY29udHJvbCBvbiB0aGUgaW5jaWRlbmNlIG9mIGNhcmJhcGVuZW0gcmVzaXN0YW50IGdyYW0tbmVnYXRpdmUgaW5mZWN0aW9ucyBpbiBNb2RlbmEsIEl0YWx5OiBhIG5vbi1saW5lYXIgdGltZS1zZXJpZXMgYW5hbHlzaXMqLiANCkl0IHJlcXVpcmVzIGluc3RhbGxpbmcgb2YgbmVjZXNzYXJ5IHBhY2thZ2VzDQoNCg0KRGF0YSBhbmQgY29kZSBhcmUgYXZhaWxhYmxlIGF0IHRoZSBHaXRodWIgcmVwb3NpdG9yeQ0KW3ZpYSB0aGlzIGxpbmtdKGh0dHBzOi8vZ2l0aHViLmNvbS9UaW1MYXdlcy9tb2RlbmFfY2FyYmFwZW5lbV9yZXNpc3RhbmNlKQ0KDQojIDEuIFByZWxpbWluYXJpZXMNCiMjIDEuMSBJbnN0YWxsIGNvcGllcyBvZiByZXF1aXJlZCBwYWNrYWdlcyB0byBwcml2YXRlIGxpYnJhcnkNCmBgYHtyLCBtZXNzYWdlPUZBTFNFLCB3YXJuaW5nPUZBTFNFfQ0KIyBJbnN0YWxsIHJlbnYgZm9yIHByaXZhdGUgcGFja2FnZSBsaWJyYXJ5IGlmIG5vdCBhdmFpbGFibGUNCmlmKCFyZXF1aXJlKHJlbnYpKXsNCiAgICBpbnN0YWxsLnBhY2thZ2VzKCJyZW52IikNCiAgICBsaWJyYXJ5KHJlbnYpDQp9DQpyZW52OjpyZXN0b3JlKCkNCmBgYA0KDQojIyAxLjIgTG9hZCByZXF1aXJlZCBwYWNrYWdlcyBhbmQgY3VzdG9taXNlZCBwbG90IHRoZW1lDQpgYGB7ciwgbWVzc2FnZT1GQUxTRSwgd2FybmluZz1GQUxTRX0NCmxpYnJhcnkodGlkeXZlcnNlKSAjIHRvIGVuYWJsZSB0aWR5dmVyc2UgZnVuY3Rpb25zDQpsaWJyYXJ5KGVhcnRoKSAjIGZvciBNQVJTDQpgYGANCg0KIyMgMS4zIExvYWQgZGF0YSBhbmQgcHJvY2Vzcw0KYGBge3IsIG1lc3NhZ2U9RkFMU0UsIHdhcm5pbmc9RkFMU0V9DQptYWluIDwtIHJlYWRfY3N2DQpgYGANCg0KIyMgMS40IE91dGxpZXIgZGV0ZWN0aW9uIGFuZCB0aW1lLXNlcmllcyBjbGVhbmluZw0KYGBge3IsIG1lc3NhZ2U9RkFMU0UsIHdhcm5pbmc9RkFMU0V9DQoNCmBgYA0KIyAyLiBEZXNjcmlwdGl2ZXMNCg0KIyAzLiBWQVJzDQoNCiMgNC4gR0FNcw0KDQojIDUuIE1BUlMNCg0KDQoNCmBgYHtyfQ0KcGxvdChjYXJzKQ0KYGBgDQoNCg==</div>
 
 
 </div>

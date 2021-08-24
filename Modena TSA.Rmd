@@ -1,11 +1,11 @@
 ---
 title: "Modena Time Series Analysis"
 output:
-  word_document:
-    toc: yes
   html_notebook:
     toc: yes
     toc_float: yes
+  word_document:
+    toc: yes
   html_document:
     df_print: paged
     toc: yes
@@ -13,16 +13,51 @@ output:
     toc: yes
 ---
 
-This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+# Introduction
+This R notebook provides code to reproduce results for the paper *Effects of antimicrobial stewardship and infection prevention and control on the incidence of carbapenem resistant gram-negative infections in Modena, Italy: a non-linear time-series analysis*. 
+It requires installing of necessary packages
 
-Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Data and code are available at the Github repository
+[via this link](https://github.com/TimLawes/modena_carbapenem_resistance)
+
+# 1. Preliminaries
+## 1.1 Install copies of required packages to private library
+```{r, message=FALSE, warning=FALSE}
+# Install renv for private package library if not available
+if(!require(renv)){
+    install.packages("renv")
+    library(renv)
+}
+renv::restore()
+```
+
+## 1.2 Load required packages and customised plot theme
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse) # to enable tidyverse functions
+library(earth) # for MARS
+```
+
+## 1.3 Load data and process
+```{r, message=FALSE, warning=FALSE}
+main <- read_csv
+```
+
+## 1.4 Outlier detection and time-series cleaning
+```{r, message=FALSE, warning=FALSE}
+
+```
+# 2. Descriptives
+
+# 3. VARs
+
+# 4. GAMs
+
+# 5. MARS
+
+
 
 ```{r}
 plot(cars)
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
-
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
-
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
