@@ -55,16 +55,22 @@ library(lattice)
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data
-main <- read_csv ("modena_maindata.csv",
+main <- read_csv ("modena_final.csv",
                   show_col_types = FALSE)
 
-# Get incidence of infections and colonisations (per 10 000 OBDs)
-main2 <- main %>% mutate(across(
-  ecoli_ccs_bsi:crpa_co_hca_adm_swab,~./obd*10000))
+# Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs)
+main <- main %>% mutate(across(
+  all_gn_bsi:crpa_co_hca_adm_swab,~./obd*10000))
 
 
-# Function for standardised antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
-main2 <- main2 %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
+# Standardise antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
+main <- main %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
+
+# Read in additional data
+hhdata <- read_csv("hh_by.csv", col_types = cols (
+  speciality = col_factor(),
+  directorate = col_factor(),
+  period = col_factor()))
 
 ```
 
@@ -72,7 +78,20 @@ main2 <- main2 %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
 ```{r, message=FALSE, warning=FALSE}
 
 ```
+
 # 2. Descriptives
+```{r, message=FALSE, warning=FALSE}
+
+# Hand-hygiene adherence by speciality and department
+hhplot <- ggplot(hhdata, aes(x=directorate, y=adherence)+
+  geom_bar(aes(fill= period), position=dodge, stat="identity",
+           width = 0.5) +
+  coord_flip()
+
+hhplot
+
+waterfall(values=hhdata$adherence, labels=hhdata$directorate)
+```
 
 # 3. VARs
 
