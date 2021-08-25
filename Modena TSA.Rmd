@@ -23,12 +23,13 @@ Data and code are available at the Github repository
 
 # 1. Preliminaries
 ## 1.1 Install copies of required packages to private library
-```{r, message=FALSE, warning=FALSE}
+```{r message=FALSE, warning=FALSE, include=FALSE}
 
 # Install renv for private package library if not available
 if(!require(renv)){
     install.packages("renv")
 }
+
 Sys.setenv(LOCALAPPDATA=renv::paths$library())
 renv::restore()
 renv::activate()
@@ -49,6 +50,7 @@ library(lmtest) # comparing models
 library(stats)
 library(grid)
 library(lattice)
+
 library(viridis)
 library(jsonlite)
 library(curl)
@@ -117,6 +119,9 @@ rm(hhdata.imp)
 
 ## 1.4 Outlier detection and time-series cleaning
 ```{r, message=FALSE, warning=FALSE}
+
+
+
 
 ```
 
