@@ -23,15 +23,17 @@ Data and code are available at the Github repository
 
 # 1. Preliminaries
 ## 1.1 Install copies of required packages to private library
-```{r, message=FALSE, warning=FALSE}
+```{r message=FALSE, warning=FALSE, include=FALSE}
 
 # Install renv for private package library if not available
 if(!require(renv)){
     install.packages("renv")
 }
 
+Sys.setenv(LOCALAPPDATA=renv::paths$library())
+Sys.getenv("LOCALAPPDATA")
 renv::restore()
-
+renv::activate()
 ```
 
 ## 1.2 Load required packages and customised plot theme
@@ -49,6 +51,7 @@ library(lmtest) # comparing models
 library(stats)
 library(grid)
 library(lattice)
+library(tzdb)
 ```
 
 ## 1.3 Load data and process
@@ -77,13 +80,16 @@ hhdata <- read_csv("hh_by.csv", col_types = cols (
 ## 1.4 Outlier detection and time-series cleaning
 ```{r, message=FALSE, warning=FALSE}
 
+
+
+
 ```
 
 # 2. Descriptives
 ```{r, message=FALSE, warning=FALSE}
 
 # Hand-hygiene adherence by speciality and department
-hhplot <- ggplot(hhdata, aes(x=directorate, y=adherence)+
+hhplot <- ggplot(hhdata, aes(x=directorate, y=adherence))+
   geom_bar(aes(fill= period), position=dodge, stat="identity",
            width = 0.5) +
   coord_flip()
