@@ -53,6 +53,7 @@ library(viridis)
 library(jsonlite)
 library(curl)
 library(sysfonts)
+library(lubridate)
 library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
@@ -63,12 +64,22 @@ source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data
-main <- read_csv ("modena_final.csv",
+main <- read_csv ("modena_carb_final.csv",
                   show_col_types = FALSE)
 
 # create a new month variable in datetime form
 main <- main %>% mutate(studymonth = as.POSIXct(paste("01-", Month, sep = ""), format = "%d-%b-%y"))
 
+# create a file of percent carbapenem resistance by pathogen, sample type, and population
+mainpc <- main %>% dplyr::select(!c(int_carb_asp:mrsa_bsi)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_admswab,
+  names_to = c(".value", "pop", "site"),
+  names_pattern = "(.*)_(.*)_(.*)") %>% filter(pop!="NA") %>% 
+  pivot_longer(cols=csab:crpa, 
+               names_to=c(".value","org"),
+               names_pattern="(cr|cs)(ab|kp|pa)")
+mainpc <- mainpc %>% mutate(pcent = cr/(cr+cs)*100)
 
 # Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs)
 main <- main %>% mutate(across(
@@ -78,17 +89,13 @@ main <- main %>% mutate(across(
 # Standardise antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
 main <- main %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
 
-# create intervention time-line
+# long format main for descriptives
+mainlong <- main %>% pivot_longer(
+  cols=!c()
+)
+
+# Read in intervention time-line
 timeline <-read_csv("timings.csv")
-timing <- ganttrify(project = timeline,
-          project_start_date = "2008-01",
-          hide_wp=TRUE,
-          line_end = "square",
-          month_breaks= 12,
-          mark_years = TRUE,
-          month_number_label = FALSE,
-          month_date_label = TRUE,
-          font_family = "Source Sans Pro ")
 
 
 # Read in bloodstream infection dataset
@@ -113,18 +120,95 @@ rm(hhdata.imp)
 
 ```
 
+
+## 1.5 Trend decomposition
+```{r, message=FALSE, warning=FALSE}
+
+```
+
 # 2. Descriptives
 
 # 2.1 Table 1
 # 2.2 Figure 1 CRO time series
+```{r, message=FALSE, warning=FALSE}
+# Create a generic timeline for the interventions
+timing <- ganttrify(project = timeline,
+          project_start_date = "2008-01",
+          hide_wp=TRUE,
+          size_text_relative = 0.9,
+          colour_palette = inferno(4, begin=0.2, 
+                                   end = 0.8),
+          line_end = "square",
+          month_breaks= 12,
+          mark_years = TRUE,
+          month_number_label = FALSE,
+          month_date_label = TRUE,
+          font_family = "Source Sans Pro ")
+
+# Create plots for total incidence by pathogen and population
+
+
+# create plots for numbers by carbapenem I/R and percentage I/R
+mainpc_long <- mainpc %>% pivot_longer(
+  cols= c(cs,cr), names_to="IR")
+mainpc_long$site <- recode(mainpc_long$site, admswab="swab")
+
+mainpc_long$IR <- recode(mainpc_long$IR, cr ="I/R", cs= "S")
+mainpc_long$IR <- as_factor(mainpc_long$IR)
+mainpc_long$IR <- relevel(mainpc_long$IR, "S","I/R")
+mainpop <- c("hca","conothca")
+mainpc_long_ed <- mainpc_long %>% filter(pop %in% mainpop)
+
+## plots for A.baumannii
+ab_all <- mainpc_long_ed %>% filter (org == "ab")
+ab_all <- ab_all %>% mutate(pcent = recode(pcent, "0"= 0.1L))
+infections <- c("bsi","resp","uti","other","swab")
+ab_all2 <- ab_all %>% filter(site %in% infections)
+ab_clinical <- mainpc_long_ed %>% filter(org =="ab" & site =="clinical")
+ab_colors <-c('#fdbe85',"#fd8d3c")
+
+abp1<- ggplot(ab_clinical, aes(x=study_m, y=value, fill=IR))+
+  geom_col(width=1,alpha=0.7)+
+  facet_grid(.~pop)+
+  scale_y_continuous(name="% Carbapenem I/R")+
+  scale_x_continuous(name = "Month and year", breaks=seq(1,132,12))+
+  geom_vline(xintercept=57, color="grey",linetype="dotdash")+
+  geom_vline(xintercept=73, color="grey",linetype="dotdash")+
+  geom_vline(xintercept=81, color="grey",linetype="dotdash")+
+  theme_pnaat()+
+  theme(axis.text.x=element_blank())+
+  scale_fill_manual (values=ab_colors)
+
+
+abp2 <- ggplot(ab_all2, aes(x=study_m, y=site, fill=pcent))+
+  geom_tile()+
+  facet_grid(.~pop)+
+  scale_x_continuous(name = "Month and year", breaks=seq(1,132,12))+
+  scale_fill_viridis_c(option="B", begin  =0.2, end=1, na.value ="grey")
+
+
+layoutab <- "
+AAAA
+AAAA
+AAAA
+BBBB
+"
+abp1 + abp2+
+  plot_layout(design = layoutab)
+#### NEED TO ADD LINE TO ABOVE....suggest prior trend decomposition to allow long-term pattern to be seen ###
+
+```
+
 # 2.3 Figure 2 Antibiotic use
+
 # 2.4 Figure 3 Hand hygiene improvements
 ```{r, message=FALSE, warning=FALSE}
 
 # Time-series for Hand-hygiene adherence, training, and alcohol-based hand-rub use (Litres per 1000 OBDs)
 
 
-t_breaks = seq(from = dmy('01-"jan"-08'), to = dmy('01-"dec"-18'), by = '12 months')
+t_breaks = seq(from = dmy('01-"jan"-08'), 
+               to =dmy('01-"dec"-18'), by = '12 months')
 
 
 hhp1 <- ggplot(main, aes(studymonth, y= abhr))+
@@ -135,11 +219,10 @@ hhp1 <- ggplot(main, aes(studymonth, y= abhr))+
      color="darkgrey")+
   scale_x_datetime(breaks= as.POSIXct(t_breaks),
                    date_labels="%b-%y")+
-  theme(panel.grid=element_blank(), 
-        axis.title.x = element_blank(),
+  theme_pnaat()+
+  theme(axis.title.x = element_blank(),
         axis.text.x=element_blank(),
-        axis.title.y= element_text(size=9))+
-  theme_pnaat()
+        axis.title.y= element_text(size=9))
 
 hhp2 <- ggplot(main, aes(studymonth, y= hh_adherence))+
   geom_line(color="darkred")+
@@ -152,11 +235,10 @@ hhp2 <- ggplot(main, aes(studymonth, y= hh_adherence))+
      color="darkgrey")+
   scale_x_datetime(breaks= as.POSIXct(t_breaks),
                    date_labels="%b-%y")+
-  theme(panel.grid=element_blank(), 
-        axis.title.x = element_blank(),
+  theme_pnaat()+
+  theme(axis.title.x = element_blank(),
         axis.text.x=element_blank(),
-        axis.title.y= element_text(size=9))+
-  theme_pnaat()
+        axis.title.y= element_text(size=9))
     
 
 hhp3 <- ggplot(main, aes(x=studymonth, 
@@ -169,13 +251,11 @@ hhp3 <- ggplot(main, aes(x=studymonth,
   scale_x_datetime(name = "Month and year", 
                    breaks= as.POSIXct(t_breaks),
                    date_labels="%b-%y")+
-  theme(panel.grid=element_blank(),
-        axis.text.x = element_text(
-          size = 8, angle=45, hjust = 1),
-        axis.title.x = element_text(size=9),
+  theme_pnaat()+
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
         axis.text.y = element_text(size=8),
-        axis.title.y= element_text(size=9))+ scale_color_viridis_d(option="A")+
-  theme_pnaat()
+        axis.title.y= element_text(size=9))+ scale_color_viridis_d(option="A")
 
 
 # Hand-hygiene adherence by speciality and department
@@ -188,16 +268,14 @@ hhp4 <- ggplot(hhdata2, aes(
   geom_tile()+
   scale_y_discrete(name="Speciality")+
   scale_x_discrete(name="Intervention phase")+
+  theme_pnaat()+
   scale_fill_viridis_c(option="A", begin=0, end=1)+
   labs(fill="Adherence")+
-  theme(axis.title.x = element_text(size=8),
-    axis.title.y= element_text(size=8),
+  theme(axis.title.x = element_text(size=9),
+    axis.title.y= element_text(size=9),
     axis.text.y =element_text(size=8),
-    legend.title = element_text(size=8),
-    legend.text = element_text(size=8))+
-  theme_pnaat()
-
-
+    legend.title = element_text(size=9),
+    legend.text = element_text(size=8))
 
 layout <- "
 EEEED
