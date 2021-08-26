@@ -67,37 +67,36 @@ source("OutlierTreatment.R") # imports custom function for detecting extreme out
 ## 1.3 Load data and process
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 
-# Read in the main data
-main <- read_csv ("modena_carb_final.csv",
+# Read in the main data and convert to a time-series table (tsibble) with "tsmonth" as the index variable
+main <- read_csv ("modena_carba_final.csv",
                   show_col_types = FALSE)
 
-# create a new month variable in datetime form
 main <- main %>% mutate(month2 = as.POSIXct(paste("01-", Month, sep = ""), format = "%d-%b-%y"))
-maints <- main %>% mutate(tsmonth = yearmonth(month2)) %>%
+
+tswide <- main %>% mutate(tsmonth = yearmonth(month2)) %>%
   as_tsibble(index = tsmonth)
 
-# Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs)
-maints <- maints %>% mutate(across(
-  all_gn_bsi:crpa_cohca_admswab,~./obd*10000))
 
+# Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs) and standardise antibiotic and alcohol-based hand rub use (DDDs or Litres per 1000 OBDs)
+tswide <- tswide  %>% mutate(across(
+  gmneg_all_bsi:crpa_cohca_swab,~./obd*10000))
 
-# Standardise antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
-maints <- maints %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
+tswide <- tswide %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
 
-
-# create a file of percent carbapenem resistance by pathogen, sample type, and population
-mainpc <- main %>% dplyr::select(!c(int_carb_asp:mrsa_bsi)) %>%
+# create long format files
+tslong <- tswide %>% dplyr::select(!c(tsmonth, bedocc:mrsa_all_bsi)) %>%
   pivot_longer(
-  cols = csab_all_any:crpa_cohca_admswab,
-  names_to = c(".value", "pop", "site"),
-  names_pattern = "(.*)_(.*)_(.*)") %>% filter(pop!="NA") %>% 
-  pivot_longer(cols=csab:crpa, 
-               names_to=c(".value","org"),
-               names_pattern="(cr|cs)(ab|kp|pa)")
-mainpc <- mainpc %>% mutate(pcent = cr/(cr+cs)*100)
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") %>% dplyr::select(!c(Month, month2))
 
+# create long format data for incidence
+tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
 
-# long format main for descriptives
+# create long format data for percent carbapenem resistance
+tslong_pc <- tslong %>% pivot_wider(names_from="IR", values_from = "value") %>% mutate(pcent = cr/(cs+cr)*100)
+
+tslong_pc$pcent <- dplyr::recode(tslong_pc$pcent,"0"="0.1")
 
 # Read in intervention time-line
 timeline <-read_csv("timelines.csv")
@@ -123,15 +122,45 @@ rm(hhdata.imp)
 ## 1.4 Outlier detection and time-series cleaning
 ```{r, message=FALSE, warning=FALSE}
 
+# outlier detection and replacement with cleaned values
 
-fq <- OutlierTreatment(maints$fluoroquinolones,freq=12,start.date=c(2008,1))
 
+
+maints2 <- maints %>% mutate(across(abhr:rectalswab, OutlierTreatment(.,freq=12,start.date=c(2008,1))))
+
+ggplot (maints, aes(x=tsmonth, y=abhr))+
+  geom_line(linetype="dotdash", colour="red")+
+  geom_line(data=maints2, aes(x=tsmonth,y=abhr))
 
 ```
 
 
 ## 1.5 Trend decomposition
 ```{r, message=FALSE, warning=FALSE}
+
+# For 
+acf(maints2$all_gn_bsi, lag=24)
+
+maints2 %>% dplyr::select(maints2$abhr)  %>%
+  gg_tsdisplay(difference(abhr), plot_type='partial')
+
+gg_tsdisplay(maints2, all_gn_bsi,  "partial")
+all_gn_bsi_d1 <- diff(maints2$all_gn_bsi, differences = 1) %>% as_tsibble()
+
+gg_tsdisplay(difference(maints2$all_gn_bsi)), plot_type='partial')
+
+
+all_gn_bsi_tsd <- maints2 %>%
+  model(
+    STL(all_gn_bsi ~ trend(window = 7) +
+                   season(window =13),
+    robust = TRUE)) %>%
+  components() %>%
+  autoplot()
+
+maints2 %>%
+  model(STL(all_gn_bsi ~ trend(window = 10))) %>%
+  components()
 
 ```
 
