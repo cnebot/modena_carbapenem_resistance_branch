@@ -43,6 +43,7 @@ library(earth) # for MARS
 library(tseries) # for working with TS data
 library(tsutils) #
 library(forecast) # for forcasting
+library(fpp3) # enables tsibble, and fable packages
 library(plotmo) # plotting MARS model from earth
 library(mgcv) # for GLM and GAM models
 library(smooth)
@@ -50,16 +51,17 @@ library(lmtest) # comparing models
 library(stats)
 library(grid)
 library(lattice)
-
-library(viridis)
-library(jsonlite)
-library(curl)
-library(sysfonts)
-library(lubridate)
+library(viridis) # for viridis colour palettes
+library(hrbrthemes) #for plot themes
+library(sysfonts) # for using google fonts
+library(lubridate) # for working with datetime variables
+library(car) # for Cook's distances
+library(strucchange) # for detecting structural changes in time-series
 library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
+source("OutlierTreatment.R") # imports custom function for detecting extreme outliers and replacing.
 ```
 
 ## 1.3 Load data and process
@@ -70,7 +72,18 @@ main <- read_csv ("modena_carb_final.csv",
                   show_col_types = FALSE)
 
 # create a new month variable in datetime form
-main <- main %>% mutate(studymonth = as.POSIXct(paste("01-", Month, sep = ""), format = "%d-%b-%y"))
+main <- main %>% mutate(month2 = as.POSIXct(paste("01-", Month, sep = ""), format = "%d-%b-%y"))
+maints <- main %>% mutate(tsmonth = yearmonth(month2)) %>%
+  as_tsibble(index = tsmonth)
+
+# Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs)
+maints <- maints %>% mutate(across(
+  all_gn_bsi:crpa_cohca_admswab,~./obd*10000))
+
+
+# Standardise antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
+maints <- maints %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
+
 
 # create a file of percent carbapenem resistance by pathogen, sample type, and population
 mainpc <- main %>% dplyr::select(!c(int_carb_asp:mrsa_bsi)) %>%
@@ -83,22 +96,11 @@ mainpc <- main %>% dplyr::select(!c(int_carb_asp:mrsa_bsi)) %>%
                names_pattern="(cr|cs)(ab|kp|pa)")
 mainpc <- mainpc %>% mutate(pcent = cr/(cr+cs)*100)
 
-# Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs)
-main <- main %>% mutate(across(
-  all_gn_bsi:crpa_co_hca_adm_swab,~./obd*10000))
-
-
-# Standardise antibiotic and alcohol-based hand-rub use (DDDs or Litres per 1000 OBDs)
-main <- main %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
 
 # long format main for descriptives
-mainlong <- main %>% pivot_longer(
-  cols=!c()
-)
 
 # Read in intervention time-line
-timeline <-read_csv("timings.csv")
-
+timeline <-read_csv("timelines.csv")
 
 # Read in bloodstream infection dataset
 blood <- read_csv("bsi_mort.csv")
@@ -107,6 +109,7 @@ blood <- read_csv("bsi_mort.csv")
 hhdata <- read_csv("hh_by.csv", col_types = cols (
   speciality = col_factor(),
   directorate = col_factor()))
+
 # Impute missing data in period 2 of hand-hygiene by speciality dataset
 hand <-as.data.frame(hhdata)
 hhdata.imp <-missForest(hand)
@@ -121,6 +124,7 @@ rm(hhdata.imp)
 ```{r, message=FALSE, warning=FALSE}
 
 
+fq <- OutlierTreatment(maints$fluoroquinolones,freq=12,start.date=c(2008,1))
 
 
 ```
@@ -133,8 +137,17 @@ rm(hhdata.imp)
 
 # 2. Descriptives
 
-# 2.1 Table 1
-# 2.2 Figure 1 CRO time series
+## 2.1 Tab 1
+```{r, message=FALSE, warning=FALSE}
+
+main %>% group_by(phase) %>% summarise(
+  mean
+  
+)
+
+
+```
+## 2.2 Fig 1 CRO time series
 ```{r, message=FALSE, warning=FALSE}
 # Create a generic timeline for the interventions
 timing <- ganttrify(project = timeline,
@@ -156,9 +169,9 @@ timing <- ganttrify(project = timeline,
 # create plots for numbers by carbapenem I/R and percentage I/R
 mainpc_long <- mainpc %>% pivot_longer(
   cols= c(cs,cr), names_to="IR")
-mainpc_long$site <- recode(mainpc_long$site, admswab="swab")
+mainpc_long$site <- dplyr::recode(mainpc_long$site, admswab ="swab")
 
-mainpc_long$IR <- recode(mainpc_long$IR, cr ="I/R", cs= "S")
+mainpc_long$IR <- dplyr::recode(mainpc_long$IR, cr ="I/R", cs= "S")
 mainpc_long$IR <- as_factor(mainpc_long$IR)
 mainpc_long$IR <- relevel(mainpc_long$IR, "S","I/R")
 mainpop <- c("hca","conothca")
@@ -166,7 +179,8 @@ mainpc_long_ed <- mainpc_long %>% filter(pop %in% mainpop)
 
 ## plots for A.baumannii
 ab_all <- mainpc_long_ed %>% filter (org == "ab")
-ab_all <- ab_all %>% mutate(pcent = recode(pcent, "0"= 0.1L))
+ab_all <- ab_all %>% mutate(pcent = dplyr::recode(pcent, 
+                                                  "0"= 0.1L))
 infections <- c("bsi","resp","uti","other","swab")
 ab_all2 <- ab_all %>% filter(site %in% infections)
 ab_clinical <- mainpc_long_ed %>% filter(org =="ab" & site =="clinical")
@@ -204,9 +218,9 @@ abp1 + abp2+
 
 ```
 
-# 2.3 Figure 2 Antibiotic use
+## 2.3 Fig 2 Antibiotic use
 
-# 2.4 Figure 3 Hand hygiene improvements
+## 2.4 Fig 3 Hand hygiene improvements
 ```{r, message=FALSE, warning=FALSE}
 
 # Time-series for Hand-hygiene adherence, training, and alcohol-based hand-rub use (Litres per 1000 OBDs)
@@ -216,7 +230,7 @@ t_breaks = seq(from = dmy('01-"jan"-08'),
                to =dmy('01-"dec"-18'), by = '12 months')
 
 
-hhp1 <- ggplot(main, aes(studymonth, y= abhr))+
+hhp1 <- ggplot(maints, aes(month2, y= abhr))+
   geom_line(color="darkred")+
   scale_y_continuous(name="ABHR use*")+
   geom_vline(xintercept=as.POSIXct(as.Date(
@@ -228,8 +242,9 @@ hhp1 <- ggplot(main, aes(studymonth, y= abhr))+
   theme(axis.title.x = element_blank(),
         axis.text.x=element_blank(),
         axis.title.y= element_text(size=9))
+hhp1
 
-hhp2 <- ggplot(main, aes(studymonth, y= hh_adherence))+
+hhp2 <- ggplot(maints, aes(month2, y= hh_adherence))+
   geom_line(color="darkred")+
   scale_y_continuous(name= "HH adherence, %",
                      limits=c(0,1), breaks=seq(0,1,0.2),
@@ -246,7 +261,7 @@ hhp2 <- ggplot(main, aes(studymonth, y= hh_adherence))+
         axis.title.y= element_text(size=9))
     
 
-hhp3 <- ggplot(main, aes(x=studymonth, 
+hhp3 <- ggplot(maints, aes(x=month2, 
                          y= hh_trained))+
   geom_line()+
   scale_y_continuous(name="Staff trained, n")+
@@ -292,7 +307,7 @@ hhp1 + hhp2 + hhp3 + hhp4 + timing+
   plot_layout(design = layout)
 
 ```
-
+## 2.5 Fig 4 Screening
 # 3. VARs
 
 # 4. GAMs
