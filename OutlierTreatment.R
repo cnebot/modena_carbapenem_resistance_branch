@@ -19,14 +19,14 @@ library(car)           # install.packages("car")
 library(tseries)       # install.packages("tseries")
 
 
-OutlierTreatment<- function(y,freq=12,start.date,level.detection=5,radius=2){
+OutlierTreatment<- function(y,freq=12,start.date,level.detection=5,radius=2, adf.tests=FALSE){
   
   
 if(!is.ts(y)) y<-ts(y,frequency=freq, start=start.date)  
   
   
 # Parameters
-ld<-level.detection      # Cook's distance to determine Outlier 
+ld<-level.detection        # Cook's distance to determine Outlier 
 r<-radius                   # radius for mean around outlier position for substitution 
 
 # Characteristics of the series
@@ -34,7 +34,7 @@ l<-length(y)
 plot.ts(y)
 
 
-# Looking for breakpoints for stationary segments
+# Looking for breakpoints for mainsegments
 
 bp.y <- breakpoints(y ~ 1)
 summary(bp.y)
@@ -75,26 +75,27 @@ for(i in 1:I(ls+1)){
 
   plot.ts(yy,main = paste("Split y", i, sep = ""))
  
-  #Augmented Dickey Fuller test
+  
+    #Augmented Dickey Fuller test
   nam.df <- paste("adf.yy", i, sep ="")
   k<-round((length(yy)-1)^(1/3))
   assign(nam.df, adf.test(yy,k=k))
 }
 
+if(adf.tests==TRUE){
 ## Print Augmented Dickey fuller test for subseries 
 for(i in 1:I(ls+1)){
   nam.df <- paste("adf.yy", i, sep = "")
   print(get(nam.df))
+  }
 }
+
 
 par(mfrow=c(1,1))
 
 
 # Outlier detection by subseries and substitute in ynew the mean value 
 ynew<-y
-
-length(c(yy1))+ length(c(yy2))
-length(c(yy3))
 
 for (i in 1:I(ls+1)){
 subseries<-get(paste("yy",i,sep=""))
@@ -127,8 +128,8 @@ if(length(outliers1)!=0){
 par(mfrow=c(1,1))
 plot<-ts.plot(y,ynew, ylim=c(0,max(y)),col=c(2,4),lty=c(1,2))
 changes<-1-(y==ynew) 
-result<-cbind(y,ynew,changes )
-colnames<-c("y","ynew", "changed")
+result<-list(y=y,ynew=ynew,changes=changes)
+if(only.clean=TRUE) result<-ynew
 
 return(result)
 }
