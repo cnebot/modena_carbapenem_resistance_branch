@@ -13,13 +13,13 @@ options(warn=-1)
 
 
 # 2. Packages
-
+library(ggplot2)       # install.packages("ggplot2")
 library(strucchange)   # install.packages("strucchange")
 library(car)           # install.packages("car")
 library(tseries)       # install.packages("tseries")
 
 
-OutlierTreatment<- function(y,freq=12,start.date,level.detection=5,radius=2, adf.tests=FALSE){
+OutlierTreatment<- function(y,freq=12,start.date,level.detection=5,radius=2, adf.tests=FALSE,only.clean=TRUE){
   
   
 if(!is.ts(y)) y<-ts(y,frequency=freq, start=start.date)  
@@ -125,11 +125,11 @@ if(length(outliers1)!=0){
 
 }
 
-par(mfrow=c(1,1))
-plot<-ts.plot(y,ynew, ylim=c(0,max(y)),col=c(2,4),lty=c(1,2))
+plot<-autoplot(cbind(y,ynew), xlab = "Time", ylab = deparse(substitute(object)))
+               
 changes<-1-(y==ynew) 
-result<-list(y=y,ynew=ynew,changes=changes)
-if(only.clean=TRUE) result<-ynew
+result<-list("y"=y,"ynew"=ynew,"changes"=changes,"plot"=plot)
+if(only.clean==TRUE) result<-ynew
 
 return(result)
 }
