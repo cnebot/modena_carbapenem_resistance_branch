@@ -33,6 +33,7 @@ if(!require(renv)){
 Sys.setenv(LOCALAPPDATA=renv::paths$library())
 renv::restore()
 renv::activate()
+
 ```
 
 ## 1.2 Load required packages and customised plot theme
@@ -61,7 +62,7 @@ library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
-source("OutlierTreatment.R") # imports custom function for detecting extreme outliers and replacing.
+source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing.
 ```
 
 ## 1.3 Load data and process
@@ -73,25 +74,27 @@ main <- read_csv ("modena_carba_final.csv",
 
 main <- main %>% mutate(month2 = as.POSIXct(paste("01-", Month, sep = ""), format = "%d-%b-%y"))
 
-tswide <- main %>% mutate(tsmonth = yearmonth(month2)) %>%
+tsmain <- main %>% mutate(tsmonth = yearmonth(month2)) %>%
   as_tsibble(index = tsmonth)
 
 
 # Calculate incidence of infections and colonisations (non-duplicate cases per 10 000 OBDs) and standardise antibiotic and alcohol-based hand rub use (DDDs or Litres per 1000 OBDs)
-tswide <- tswide  %>% mutate(across(
+tswide <- tsmain  %>% mutate(across(
   gmneg_all_bsi:crpa_cohca_swab,~./obd*10000))
 
 tswide <- tswide %>% mutate(across(abhr: fluoroquinolones, ~./obd*1000))
+tsablong <- tswide %>% as_tibble() %>% dplyr::select(study_m, all_monitor_abx:fluoroquinolones) %>% pivot_longer(!study_m, names_to = "abx", values_to="use")
 
 # create long format files
-tslong <- tswide %>% dplyr::select(!c(tsmonth, bedocc:mrsa_all_bsi)) %>%
+tslong <- tsmain %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
   pivot_longer(
   cols = csab_all_any:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") %>% dplyr::select(!c(Month, month2))
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") %>% dplyr::select(-c(Month, month2))
 
 # create long format data for incidence
 tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
+tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site))
 
 # create long format data for percent carbapenem resistance
 tslong_pc <- tslong %>% pivot_wider(names_from="IR", values_from = "value") %>% mutate(pcent = cr/(cs+cr)*100)
@@ -123,44 +126,80 @@ rm(hhdata.imp)
 ```{r, message=FALSE, warning=FALSE}
 
 # outlier detection and replacement with cleaned values
+tswideabx <- tswide %>% as_tibble %>% dplyr::select(obd,bedocc,
+abhr:fluoroquinolones)
 
+newabx.matrix<-rep(0,132)
+for(i in 1:length(tswideabx[1,])){
+abx<- tswideabx[,i]
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx.matrix <-cbind(newabx.matrix, newabx)
+}
+newabx.matrix<-newabx.matrix[,-1]
 
+colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
+tswide_clean <-tswide %>% dplyr::select(!c(obd,bedocc,
+abhr:fluoroquinolones))
+tswide_clean <- cbind(tswide_clean, newabx.matrix) %>% as_tsibble(index = tsmonth)
 
-maints2 <- maints %>% mutate(across(abhr:rectalswab, OutlierTreatment(.,freq=12,start.date=c(2008,1))))
-
-ggplot (maints, aes(x=tsmonth, y=abhr))+
-  geom_line(linetype="dotdash", colour="red")+
-  geom_line(data=maints2, aes(x=tsmonth,y=abhr))
+tswide_clean %>% autoplot(gmneg_all_bsi)
+tswide_cl_pre <- tswide_clean %>% filter(tswide_clean$int_hand == FALSE)
+tswide_clean %>% autoplot(cephalosporins_DDD)
 
 ```
 
 
 ## 1.5 Trend decomposition
 ```{r, message=FALSE, warning=FALSE}
+tslong <- tsmain %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") %>% dplyr::select(-c(Month, month2))
 
-# For 
-acf(maints2$all_gn_bsi, lag=24)
+# create long format data for incidence
+tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
+tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site))
 
-maints2 %>% dplyr::select(maints2$abhr)  %>%
-  gg_tsdisplay(difference(abhr), plot_type='partial')
+#####################
+tslong_bugs <- tswide %>% dplyr::select(-(bedocc:mrsa_all_bsi)) %>%
+  pivot_longer(
+  cols = c(csab_all_any:crpa_cohca_swab),
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
+  values_to="incidence") %>% filter(incidence !="NA") %>% 
+  select(-c("Month","study_m","month2","obd")) %>%
+  mutate(bugs = paste(IR,org,pop,site))
 
-gg_tsdisplay(maints2, all_gn_bsi,  "partial")
-all_gn_bsi_d1 <- diff(maints2$all_gn_bsi, differences = 1) %>% as_tsibble()
+tslong_bugs2 <- tslong_bugs %>% group_by(bugs,IR,org,pop,site) %>% nest() %>% filter(pop != "all")
 
-gg_tsdisplay(difference(maints2$all_gn_bsi)), plot_type='partial')
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
+                                 season(window =13), robust = TRUE)) %>%
+      components()
+    data <-cbind(data,tmpd[,3:6])
+}
 
+ts_decomp <- tslong_bugs2 %>% 
+    mutate(decs = map(data, decompose, y = incidence)) %>%
+    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 
-all_gn_bsi_tsd <- maints2 %>%
-  model(
-    STL(all_gn_bsi ~ trend(window = 7) +
-                   season(window =13),
-    robust = TRUE)) %>%
-  components() %>%
-  autoplot()
+plotting of clinical infection type series
+clinicals <- c("bsi","resp")
+mainpops <- c("hca", "conothca")
+ts_decomp_ab <- ts_decomp %>% filter (org == "ab") %>% filter(IR=="cr")
 
-maints2 %>%
-  model(STL(all_gn_bsi ~ trend(window = 10))) %>%
-  components()
+ts_decomp_crab <- ts_decomp_ab %>% filter (IR == "cr") %>% filter (site == "bsi" | site =="resp" | site == "uti" |site =="other") %>% filter (pop == "hca" | pop=="conothca")
+
+ 
+
+ab_sites <- ggplot(ts_decomp_crab, aes(x=tsmonth, y=inc, group=site, color=site))+
+  geom_line()+
+  facet_grid (.~pop)
+ab_sites+scale_colour_viridis_d(option="A", begin=0, end = 0.8)
 
 ```
 
@@ -169,10 +208,7 @@ maints2 %>%
 ## 2.1 Tab 1
 ```{r, message=FALSE, warning=FALSE}
 
-main %>% group_by(phase) %>% summarise(
-  mean
-  
-)
+
 
 
 ```
@@ -207,6 +243,7 @@ mainpop <- c("hca","conothca")
 mainpc_long_ed <- mainpc_long %>% filter(pop %in% mainpop)
 
 ## plots for A.baumannii
+ts_decomp_ab
 ab_all <- mainpc_long_ed %>% filter (org == "ab")
 ab_all <- ab_all %>% mutate(pcent = dplyr::recode(pcent, 
                                                   "0"= 0.1L))
@@ -240,8 +277,10 @@ AAAA
 AAAA
 AAAA
 BBBB
+CCCC
+CCCC
 "
-abp1 + abp2+
+abp1 + abp2+ ab_sites+
   plot_layout(design = layoutab)
 #### NEED TO ADD LINE TO ABOVE....suggest prior trend decomposition to allow long-term pattern to be seen ###
 
@@ -337,11 +376,65 @@ hhp1 + hhp2 + hhp3 + hhp4 + timing+
 
 ```
 ## 2.5 Fig 4 Screening
-# 3. VARs
 
-# 4. GAMs
+# 3. ARIMAs 
+```{r}
+# Look at key variables
+tswide_clean %>% features(gmneg_all_bsi, unitroo_kpss)
+tswide_clean  %>%
+  features(gmneg_all_bsi, unitroot_kpss)
+tswide_clean %>%
+  mutate(diff_gmneg_all_bsi=difference(gmneg_all_bsi))
 
-# 5. MARS
+tswide_clean %>% features(gmneg_all_bsi, unitroot_nsdiffs, differences =0:2, .period=12)
+
+
+tswide_clean %>%
+  mutate(diff_gmneg_all_bsi=difference(gmneg_all_bsi)) %>%
+  features(diff_gmneg_all_bsi, unitroot_ndiffs, differences =0:2, .period=1)
+
+unitroot_nsdiffs()
+%>%
+  features(diff_gmneg_all_bsi, unitroot_kpss)
+
+tswide_clean$diff_gmneg_all_bsi
+
+# some example Cross-correlation functions 
+## Between Gram-negative BSI and use of antibiotics
+ccf(tswide_cl_pre$gmneg_all_bsi,tswide_cl_pre$cephalosporins_DDD)
+
+## Between antibiotic use and CROs
+### Klebsiella pneumoniae
+ccf(tswide_cl_pre$carbapenems, tswide_cl_pre$crkp_hca_clinical)
+
+auto.arima.df <- function(data, y, ...){
+    y <- enquo(y)
+    yts <- data %>% 
+        pull(!!y) %>% 
+        as.ts()
+    auto.arima(yts, ...)
+}
+newabx.matrix<-rep(0,132)
+for(i in 1:length(tswideabx[1,])){
+abx<- tswideabx[,i]
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx.matrix <-cbind(newabx.matrix, newabx)
+}
+newabx.matrix<-newabx.matrix[,-1]
+
+colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
+tswide_clean <-tswide %>% dplyr::select(!c(obd,bedocc,
+abhr:fluoroquinolones))
+tswide_clean <- cbind(tswide_clean, newabx.matrix) %>% as_tsibble(index = tsmonth)
+
+
+```
+
+# 4. Interactions and VARs
+
+# 5. GAMs
+
+# 6. MARS
 
 
 
