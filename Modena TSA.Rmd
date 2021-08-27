@@ -161,18 +161,6 @@ tslong <- tsmain %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
 tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
 tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site))
 
-#####################
-tslong_bugs <- tswide %>% dplyr::select(-(bedocc:mrsa_all_bsi)) %>%
-  pivot_longer(
-  cols = c(csab_all_any:crpa_cohca_swab),
-  names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
-  values_to="incidence") %>% filter(incidence !="NA") %>% 
-  select(-c("Month","study_m","month2","obd")) %>%
-  mutate(bugs = paste(IR,org,pop,site))
-
-tslong_bugs2 <- tslong_bugs %>% group_by(bugs,IR,org,pop,site) %>% nest() %>% filter(pop != "all")
-
 decompose <- function(data, y, ...){
     y <- enquo(y)
     dvar <- data %>% pull(!!y) %>% as.ts()
@@ -186,20 +174,6 @@ ts_decomp <- tslong_bugs2 %>%
     mutate(decs = map(data, decompose, y = incidence)) %>%
     dplyr::select(-data) %>% unnest(decs) %>% ungroup()
 ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
-
-plotting of clinical infection type series
-clinicals <- c("bsi","resp")
-mainpops <- c("hca", "conothca")
-ts_decomp_ab <- ts_decomp %>% filter (org == "ab") %>% filter(IR=="cr")
-
-ts_decomp_crab <- ts_decomp_ab %>% filter (IR == "cr") %>% filter (site == "bsi" | site =="resp" | site == "uti" |site =="other") %>% filter (pop == "hca" | pop=="conothca")
-
- 
-
-ab_sites <- ggplot(ts_decomp_crab, aes(x=tsmonth, y=inc, group=site, color=site))+
-  geom_line()+
-  facet_grid (.~pop)
-ab_sites+scale_colour_viridis_d(option="A", begin=0, end = 0.8)
 
 ```
 
