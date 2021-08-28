@@ -1,0 +1,263 @@
+---
+title: "Modena Time Series Analysis"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+# Introduction
+This R notebook provides code to reproduce results for the paper *Effects of antimicrobial stewardship and infection prevention and control on the incidence of carbapenem resistant gram-negative infections in Modena, Italy: a non-linear time-series analysis*. 
+It requires installing of necessary packages
+
+
+Data and code are available at the Github repository
+[via this link](https://github.com/TimLawes/modena_carbapenem_resistance)
+
+# 1. Preliminaries
+## 1.1 Install copies of required packages to private library
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Install renv for private package library if not available
+if(!require(renv)){
+    install.packages("renv")
+}
+
+Sys.setenv(LOCALAPPDATA=renv::paths$library())
+renv::restore()
+renv::activate()
+
+```
+
+## 1.2 Load required packages and customised plot theme
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse) # to enable tidyverse functions
+library(earth) # for MARS
+library(tseries) # for working with TS data
+library(tsutils) #
+library(forecast) # for forcasting
+library(fpp3) # enables tsibble, and fable packages
+library(plotmo) # plotting MARS model from earth
+library(mgcv) # for GLM and GAM models
+library(smooth)
+library(lmtest) # comparing models 
+library(stats)
+library(grid)
+library(lattice)
+library(viridis) # for viridis colour palettes
+library(hrbrthemes) #for plot themes
+library(sysfonts) # for using google fonts
+library(lubridate) # for working with datetime variables
+library(car) # for Cook's distances
+library(strucchange) # for detecting structural changes in time-series
+library(ganttrify) # for time lines (Gantt type)
+library(patchwork) # for combining different plot types
+library(missForest) # for missing value imputation by random forest
+source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
+source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing.
+```
+
+## 1.3 Load data and process
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+# Read in the main data 
+main <- read_csv ("modena_carba_final.csv", show_col_types =FALSE)
+date <- tibble(date = as.Date("2008-01-01")+0:131)
+main2 <- cbind(date,main) %>% dplyr::select(!c(Month))
+
+
+
+# Create wide format NOT as tsibble()
+wide <- main2  %>% mutate(across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
+                         across(abhr: fluoroquinolones, ~./obd*1000)) 
+
+# Create wide as tsibble()
+tswide <- wide %>% as_tsibble(index = date)
+
+
+
+```
+
+## 1.4 Outlier detection and time-series cleaning
+```{r, message=FALSE, warning=FALSE}
+
+# outlier detection and replacement with cleaned values
+wideabx <- wide %>% as_tibble %>% dplyr::select(date, obd, bedocc,
+abhr:fluoroquinolones)
+
+newabx.matrix<-rep(0,132)
+for(i in 1:length(wideabx[1,])){
+abx<- tswideabx[,i]
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx.matrix <-cbind(newabx.matrix, newabx)
+}
+newabx.matrix<-newabx.matrix[,-1]
+
+colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
+wide_clean <-main2 %>% dplyr::select(!c(date, obd,bedocc,
+abhr:fluoroquinolones))
+wide_clean <- cbind(wide_clean, newabx.matrix)
+
+```
+
+
+## 1.5 Trend decomposition
+```{r, message=FALSE, warning=FALSE}
+
+# create long format data for incidence
+
+tslong <- tswide %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") 
+
+# create long format data for incidence
+tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
+tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
+
+
+tslong_bugs <- tslong_incid %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+
+tslongbugs_tmp <- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
+
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
+                                 season(window =13), robust = TRUE)) %>%
+      components()
+    data <-cbind(data,tmpd[,3:6])
+}
+
+ts_decomp <- tslongbugs_tmp %>% 
+    mutate(decs = map(data, decompose, y = incidence)) %>%
+    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
+
+```
+
+# 2. Descriptives
+see other script
+
+# 3. ARIMAs
+Required for the following:
+
+* Main outcomes (crpa hca clinical, crpa conothca clinical, crkp hca clinical, crkp conothca clinical, crab hca clinical, crab conothca clinical )
+* Antibiotic time-series (for counterfactuals)
+* gmneg_all_bsi (all gram neg bloodstream isolates, should predict abx use series)
+* ecoliccs_all_bsi (all carbapenem and cephalosporin sensitive E.coli BSI, should predict abx use series)
+* ecoli3gcr_all_bsi (3GC resistant E.coli BSI, should predict antibiotic use)
+* abhr (for counterfactuals)
+
+```{r}
+# 1. ARIMAs for main outcomes
+tswide_clean <- wide_clean %>% mutate(tsmonth = yearmonth(date)) %>% as_tsibble(index = tsmonth)
+
+## 1.1 CRKp clinical time series 
+### 1.1.1 Whole time series
+tswide_clean %>% autoplot(crkp_ho_clinical)   # Plot the data
+tswide_clean %>% gg_tsdisplay(crkp_ho_clinical, "partial") # Plot the data, ACF, PACF
+tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical), "partial")  # Plot differenced data, ACF, PACF
+
+tswide_clean %>% features(crkp_ho_clinical, unitroot_kpss)  # unit root test (?stationary)
+tswide_clean %>% features(crkp_ho_clinical, unitroot_ndiffs) # Num of recommended differencing
+tswide_clean %>% features(crkp_ho_clinical, unitroot_nsdiffs,.period=12) #Num of recommended seasonal differencing
+
+lambda<-guerrero(tswide_clean$crkp_ho_clinical, .period=12L)  #Lambda for Box-Cox transformation
+tswide_clean$crkp_ho_clinical_bc <- (((tswide$crkp_ho_clinical)^lambda)-1)/lambda
+
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_kpss) # unit root test for transformed variable
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_ndiffs) # Num of recommended differencing for transformed data
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_nsdiffs,.period=12) #Num of recommended seasonal differencing for transformed data
+tswide_clean %>% gg_tsdisplay(crkp_ho_clinical_bc, "partial") # Plot the transformed data, ACF, PACF
+tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical_bc), "partial")  # Plot differenced transformed data, ACF, PACF
+
+arima_crkp_ho <- tswide_clean %>% model(
+  arima_crkp_ho_111 = ARIMA(crkp_ho_clinical ~ pdq(1,1,1)),
+  stepwise_crkp_ho = ARIMA(crkp_ho_clinical)) # fit best manual and auto ARIMA with default approach for NON-TRANSFORMED DATA
+
+glance(arima_crkp_ho) %>% arrange(AICc) %>% select(.model:BIC)
+arima_crkp_ho  %>% select(arima_crkp_ho_111) %>% gg_tsresiduals() # compare models
+arima_crkp_ho %>% select(stepwise_crkp_ho) %>% gg_tsresiduals() # compare models
+
+
+
+arima_crkp_ho_bc <- tswide_clean %>% model(
+  arima_crkp_ho_bc_111 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,1,1)),
+  arima_crkp_ho_bc_011 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,1,1)),
+  stepwise_crkp_ho_bc = ARIMA(crkp_ho_clinical_bc)) # fit best manual and auto ARIMA with default approach for TRANSFORMED data
+
+glance(arima_crkp_ho_bc) %>% arrange(AICc) %>% select(.model:BIC)
+arima_crkp_ho_bc  %>% select(arima_crkp_ho_bc_111) %>% gg_tsresiduals() # compare models
+arima_crkp_ho_bc %>% select(stepwise_crkp_ho_bc) %>% gg_tsresiduals() # compare models
+
+
+augment(arima_crkp_ho) %>% 
+  filter(.model=='arima_crkp_ho_111') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+
+augment(arima_crkp_ho) %>% 
+  filter(.model=='stepwise_crkp_ho_bc') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+
+fable::
+
+## 1.2 Pre intervention only
+
+
+WWWusage %>% forecast::forecast() %>% plot()
+
+
+
+# some example Cross-correlation functions 
+## Between Gram-negative BSI and use of antibiotics
+ccf(tswide_clean$gmneg_all_bsi,tswide_clean$cephalosporins_DDD)
+
+## Between antibiotic use and CROs
+### Klebsiella pneumoniae
+ccf(tswide_cl_pre$carbapenems, tswide_cl_pre$crkp_hca_clinical)
+
+auto.arima.df <- function(data, y, ...){
+    y <- enquo(y)
+    yts <- data %>% 
+        pull(!!y) %>% 
+        as.ts()
+    auto.arima(yts, ...)
+}
+newabx.matrix<-rep(0,132)
+for(i in 1:length(tswideabx[1,])){
+abx<- tswideabx[,i]
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx.matrix <-cbind(newabx.matrix, newabx)
+}
+newabx.matrix<-newabx.matrix[,-1]
+
+colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
+tswide_clean <-tswide %>% dplyr::select(!c(obd,bedocc,
+abhr:fluoroquinolones))
+tswide_clean <- cbind(tswide_clean, newabx.matrix) %>% as_tsibble(index = tsmonth)
+
+
+```
+
+# 4. Interactions and VARs
+
+# 5. GAMs
+
+# 6. MARS
+
+
+
+```{r}
+plot(cars)
+```
+
