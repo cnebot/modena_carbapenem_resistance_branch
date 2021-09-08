@@ -37,7 +37,7 @@ renv::activate()
 ```
 
 ## 1.2 Load required packages and customised plot theme
-```{r, message=FALSE, warning=FALSE}
+```{r, messages =FALSE, warning=FALSE}
 
 library(tidyverse) # to enable tidyverse functions
 library(earth) # for MARS
@@ -61,33 +61,30 @@ library(strucchange) # for detecting structural changes in time-series
 library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
+library(mgcViz) # for plots and model checks of GAM
 source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
 source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing.
 ```
 
 ## 1.3 Load data and process
-```{r, message=FALSE, warning=FALSE, results='hide'}
+```{r, messages =FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data 
-main <- read_csv ("modena_carba_final.csv", show_col_types =FALSE)
+main <- read_csv ("modena_carbapenem.csv", show_col_types =FALSE)
 date <- tibble(date = as.Date("2008-01-01")+0:131)
-main2 <- cbind(date,main) %>% dplyr::select(!c(Month))
+main2 <- cbind(date,main) %>% dplyr::select(!c(months, study_m))
 
-
-
-# Create wide format NOT as tsibble()
+# Create wide format without time-series index (not as a tsibble)
 wide <- main2  %>% mutate(across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
                          across(abhr: fluoroquinolones, ~./obd*1000)) 
 
-# Create wide as tsibble()
+# Create wide as a time-series indexed table (tsibble)
 tswide <- wide %>% as_tsibble(index = date)
-
-
 
 ```
 
 ## 1.4 Outlier detection and time-series cleaning
-```{r, message=FALSE, warning=FALSE}
+```{r, messages=FALSE, warning=FALSE}
 
 # outlier detection and replacement with cleaned values
 wideabx <- wide %>% as_tibble %>% dplyr::select(date, obd, bedocc,
@@ -95,13 +92,13 @@ abhr:fluoroquinolones)
 
 newabx.matrix<-rep(0,132)
 for(i in 1:length(wideabx[1,])){
-abx<- tswideabx[,i]
+abx<- wideabx[,i]
 newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
 newabx.matrix <-cbind(newabx.matrix, newabx)
 }
 newabx.matrix<-newabx.matrix[,-1]
 
-colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
+colnames(newabx.matrix)<-c(paste0(colnames(wideabx)))
 wide_clean <-main2 %>% dplyr::select(!c(date, obd,bedocc,
 abhr:fluoroquinolones))
 wide_clean <- cbind(wide_clean, newabx.matrix)
@@ -110,7 +107,7 @@ wide_clean <- cbind(wide_clean, newabx.matrix)
 
 
 ## 1.5 Trend decomposition
-```{r, message=FALSE, warning=FALSE}
+```{r, messages =FALSE, warning=FALSE}
 
 # create long format data for incidence
 
@@ -119,15 +116,12 @@ tslong <- tswide %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
   cols = csab_all_any:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
   names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") 
-
-# create long format data for incidence
 tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
 tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
 
-
 tslong_bugs <- tslong_incid %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
 
-tslongbugs_tmp <- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
+tslongbugs2<- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
 
 decompose <- function(data, y, ...){
     y <- enquo(y)
@@ -138,7 +132,7 @@ decompose <- function(data, y, ...){
     data <-cbind(data,tmpd[,3:6])
 }
 
-ts_decomp <- tslongbugs_tmp %>% 
+ts_decomp <- tslongbugs2 %>% 
     mutate(decs = map(data, decompose, y = incidence)) %>%
     dplyr::select(-data) %>% unnest(decs) %>% ungroup()
 ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
@@ -146,85 +140,586 @@ ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 ```
 
 # 2. Descriptives
-see other script
+
+## 2.1 Regional & national comparison
+```{r, messages =FALSE, warning=FALSE}
+
+# Prepare data
+otherpops <- read_csv("populations_year.csv", col_types = cols(
+  pop = col_factor(),
+  org = col_factor(),
+  poporg = col_factor(),
+  orgsite = col_factor(),
+  year = col_integer(),
+  site = col_factor(),
+  num_ts=col_factor()
+))
+
+otherpops_ed <- otherpops %>% filter(studyp==1) %>% mutate(y=pc_IR/100)
+otherpops_ed <- otherpops_ed %>% filter(carb_IR != "NA") %>% mutate(pop_org = interaction(pop, org))
+otherpops_ed1 <- otherpops_ed %>% mutate(
+  opop = ordered(pop, levels = c("Emilia-Romagna (other)","Emilia-Romagna",  "Modena", "Italy")),
+  oorg = ordered(org, levels=c("P.aeruginosa","A.baumannii", "K.pneumoniae")),
+  osite = ordered(site,levels = c("All clinical", "BSI")))
+otherpops_ed2 <- otherpops_ed %>% filter(pop=="Modena")
+
+
+#### Observed value plot ####################
+# Plot of % resistant (%I/R) by population and organism
+popp1<- ggplot(otherpops_ed1,  
+    aes(year,pc_IR, group=pop, color=pop))+
+    geom_line()+
+    scale_x_continuous("Year",breaks=seq(2008,2018,2))+
+    facet_grid(org~site, scales = "free_y")+
+    scale_color_viridis_d(option="A", begin=0.8, end=0.2)+
+    theme_pnaat()+
+  theme(legend.position="top")
+
+# Plot the % of regional infections in Modena by carbapenem sensitivity
+popp2<- ggplot(otherpops_ed2, aes(year,`pc_Emilia-Romagna_IR`, 
+  group= org, color=org))+
+  geom_line()+
+  geom_line(aes(year,`pc_Emilia-Romagna_S`), linetype = "dashed")+
+  scale_x_continuous("Year", breaks=seq(2008,2018,2))+
+  facet_grid(org~site, scales="free_y")+
+  scale_color_viridis_d(option="A", begin=0.8, end=0.2)+
+  theme_pnaat()+
+  theme(legend.position="top")
+
+popp1+popp2
+  
+
+###### GAMs by organism ############################################
+
+### K.pneumoniae GAM
+kp_pop <- otherpops_ed1 %>% filter(org =="K.pneumoniae")
+
+# "ordered factor" GAM to identify between population differences
+kp_pop_GAM <- gam(carb_IR/tested ~ osite+opop +s(year) +s(year,by=opop, m=2, k=-1, bs="tp")+s(year,by=osite, k=-1, m=2, bs="tp"), data = kp_pop, weights = tested, family = binomial(link="logit"))
+
+acf_resid(kp_pop_GAM , split_pred=list(pop= kp_pop$opop, site=kp_pop$site),n=6)
+(valRho <- acf(resid(kp_pop_GAM), plot=FALSE)$acf[2])
+
+kppopViz <- getViz(kp_pop_GAM)
+summary(kppopViz)
+gam.check(kppopViz)
+print(plot(kppopViz, allTerms = T), pages = 1)
+concurvity(kppopViz, full=TRUE)
+AIC(kppopViz)
+BIC(kppopViz)
+
+# With random smooths
+kp_pop_GAMrand <- gam(carb_IR/tested ~ s(year, pop, bs="fs")+s(year,site, bs="fs"), data = kp_pop, weights = tested, family = binomial(link="logit"))
+
+acf_resid(kp_pop_GAMrand, split_pred=list(pop= kp_pop$opop, site=kp_pop$site),n=6)
+(valRho <- acf(resid(kp_pop_GAMrand), plot=FALSE)$acf[2])
+
+kppopViz1 <- getViz(kp_pop_GAMrand)
+summary(kppopViz1)
+gam.check(kppopViz1)
+print(plot(kppopViz1, allTerms = T), pages = 1)
+concurvity(kppopViz1, full=TRUE)
+AIC(kppopViz1)
+BIC(kppopViz1)
+
+# Smooth by Interaction of factors
+kp_pop_GAM2 <- gam(carb_IR/tested ~ opop+osite+ s(year,by=interaction(osite,opop), k=-1), data =  kp_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(kp_pop_GAM2 )
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+# gather and plot
+kp_pop_fit<- cbind(kp_pop, predict.gam(kp_pop_GAM2,
+                  se.fit=TRUE, type = "link")) 
+kp_pop_fit$uci<-kp_pop_fit$fit + (2 * kp_pop_fit$se.fit) 
+kp_pop_fit$lci<-kp_pop_fit$fit - (2 * kp_pop_fit$se.fit) 
+kp_pop_fit$uci<-kp_pop_GAM$family$linkinv(kp_pop_fit$uci )
+kp_pop_fit$lci<-kp_pop_GAM$family$linkinv(kp_pop_fit$lci )
+kp_pop_fit$est<- kp_pop_GAM$family$linkinv(kp_pop_fit$fit)
+
+kppop_plot <- ggplot(kp_pop_fit, aes(x=year, y= fit, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)))+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.3, color=NA)+facet_grid(~site)+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+##### P.aeruginosa GAM
+pa_pop <- otherpops_ed1 %>% filter(org =="P.aeruginosa")
+
+# "ordered factor" GAM to identify between population differences
+pa_pop_GAM <- gam(carb_IR/tested ~ opop*osite+s(year)+s(year, by=opop, m=2, bs="tp")+s(year, by=osite, m=2, bs="tp"), data = pa_pop, weights = tested, family = binomial(link="logit"))
+
+acf_resid(pa_pop_GAM, split_pred=list(pop= pa_pop$opop, site=pa_pop$osite),n=6)
+(valRho <- acf(resid(pa_pop_GAM), plot=FALSE)$acf[2])
+
+papopViz <- getViz(pa_pop_GAM)
+summary(papopViz)
+check(papopViz)
+print(plot(papopViz, allTerms = T), pages = 1)
+concurvity(papopViz, full=TRUE)
+concurvity(papopViz, full=FALSE)
+AIC(papopViz)
+BIC(papopViz)
+
+# With random smooths
+pa_pop_GAMrand <- gam(carb_IR/tested ~ s(year, by=pop, bs="fs")+s(site, bs="re"), data = pa_pop, weights = tested, family = binomial(link="logit"))
+
+acf_resid(pa_pop_GAMrand, split_pred=list(pop= pa_pop$opop, site=pa_pop$site),n=6)
+(valRho <- acf(resid(pa_pop_GAMrand), plot=FALSE)$acf[2])
+
+papopViz1 <- getViz(pa_pop_GAMrand)
+summary(papopViz1)
+gam.check(papopViz1)
+print(plot(papopViz1, allTerms = T), pages = 1)
+concurvity(papopViz1, full=TRUE)
+AIC(papopViz1)
+BIC(papopViz1)
+
+# Smooth by Interaction of factors
+pa_pop_GAM2 <- gam(carb_IR/tested ~ opop+osite+ s(year,by=interaction(osite,opop), k=-1), data =  pa_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(kp_pop_GAM2 )
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+# gather and plot predicted values
+pa_pop_fit<- cbind(pa_pop, predict.gam(pa_pop_GAM2,
+                  se.fit=TRUE, type = "link")) 
+pa_pop_fit$uci<-pa_pop_fit$fit + (2 * pa_pop_fit$se.fit) 
+pa_pop_fit$lci<-pa_pop_fit$fit - (2 * pa_pop_fit$se.fit) 
+pa_pop_fit$uci<-pa_pop_GAM$family$linkinv(pa_pop_fit$uci )
+pa_pop_fit$lci<-pa_pop_GAM$family$linkinv(pa_pop_fit$lci )
+pa_pop_fit$est<- pa_pop_GAM$family$linkinv(pa_pop_fit$fit)
+
+papop_plot <- ggplot(pa_pop_fit, aes(x=year, y= fit, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)))+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.3, color=NA)+facet_grid(~site)+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+##### A.baumannii GAM
+ab_pop <- otherpops_ed1 %>% filter(org =="A.baumannii")
+
+# "ordered factor" GAM to identify between population differences
+ab_pop_GAM <- gam(carb_IR/tested ~ opop+osite+ s(year)+s(year, by=opop, m=2, bs="fs")+s(year, by=osite, m=2, bs="fs"), data = ab_pop, weights = tested, family = binomial(link="logit"))
+
+abpopViz <- getViz(ab_pop_GAM)
+summary(abpopViz)
+check(abpopViz)
+print(plot(abpopViz, allTerms = T),pages = 1)
+concurvity(abpopViz, full=TRUE)
+concurvity(abpopViz, full=FALSE)
+AIC(abpopViz)
+BIC(abpopViz)
+
+acf_resid(ab_pop_GAM, split_pred=list(pop= ab_pop$opop, site=ab_pop$site),n=6)
+(valRho <- acf(resid(ab_pop_GAM), plot=FALSE)$acf[2])
+
+
+# Random smooths GAM 
+ab_pop_GAM1 <- gam(carb_IR/tested ~ s(year, pop, m=2, bs="fs"), data = ab_pop, weights = tested, family = binomial(link="logit"))
+
+abpopViz <- getViz(ab_pop_GAM1)
+summary(abpopViz)
+check(abpopViz)
+print(plot(abpopViz, allTerms = T),pages = 1)
+concurvity(abpopViz, full=TRUE)
+concurvity(abpopViz, full=FALSE)
+AIC(abpopViz)
+BIC(abpopViz)
+
+acf_resid(ab_pop_GAM1, split_pred=list(pop= ab_pop$opop, site=ab_pop$site),n=6)
+(valRho <- acf(resid(ab_pop_GAM1), plot=FALSE)$acf[2])
+
+# Smooth by Interaction of factors
+ab_pop_GAM2 <- gam(carb_IR/tested ~ opop+osite+ s(year,by=interaction(osite,opop), k=-1), data =  ab_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(ab_pop_GAM2 )
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+# gather and plot predicted values
+ab_pop_fit<- cbind(ab_pop, predict.gam(ab_pop_GAM2,
+                  se.fit=TRUE, type = "link")) 
+ab_pop_fit$uci<-ab_pop_fit$fit + (2 * ab_pop_fit$se.fit) 
+ab_pop_fit$lci<-ab_pop_fit$fit - (2 * ab_pop_fit$se.fit) 
+ab_pop_fit$uci<-ab_pop_GAM$family$linkinv(ab_pop_fit$uci )
+ab_pop_fit$lci<-ab_pop_GAM$family$linkinv(ab_pop_fit$lci )
+ab_pop_fit$est<- ab_pop_GAM$family$linkinv(ab_pop_fit$fit)
+
+abpop_plot <- ggplot(ab_pop_fit, aes(x=year, y= fit, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)))+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.3, color=NA)+facet_grid(~site)+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+
+################### Plots by site of infection #################
+
+#### Clinical GAM
+clin_pop <- otherpops_ed1 %>% filter(site=="All clinical")
+
+# "ordered factor" GAM to identify between population differences
+clinical_GAM <- gam(carb_IR/tested ~ opop*oorg +s(year)+s(year, by=opop,m=2, bs="tp", k=-1)+s(year, by=oorg,m=2, k=-1), data =  clin_pop, weights = tested, family = binomial(link="logit"), method="REML")
+                    
+popViz <- getViz(clinical_GAM)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+concurvity(popViz, full=FALSE)
+AIC(popViz)
+BIC(popViz)
+
+acf_resid(clinical_GAM, split_pred=list(pop= clin_pop$opop, site=clin_pop$osite),n=6)
+(valRho <- acf(resid(clinical_GAM), plot=FALSE)$acf[2])
+
+# random smooths model
+clinical_GAM1<- gam(carb_IR/tested ~ s(year, pop,k=-1, bs="fs")+s(year, org,k=-1, bs="fs"), data =  clin_pop, weights = tested, family = binomial(link="logit"), AR.start= clin_pop$start.event, rho=0.9)
+
+popViz <- getViz(clinical_GAM1)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+acf_resid(clinical_GAM1, split_pred=list(pop= clin_pop$opop, site=clin_pop$osite),n=6)
+(valRho <- acf(resid(clinical_GAM2), plot=FALSE)$acf[2])
+
+# Smooth by Interaction of factors
+clinical_GAM2 <- gam(carb_IR/tested ~ opop*oorg+ s(year,by=interaction(oorg,opop), k=-1), data =  clin_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(clinical_GAM2)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+
+# gather and plot predicted values
+clin_fit<- cbind(clin_pop, predict.gam(clinical_GAM2,
+                  se.fit=TRUE, type = "link")) 
+clin_fit$uci<-clin_fit$fit + (2 * clin_fit$se.fit) 
+clin_fit$lci<-clin_fit$fit - (2 * clin_fit$se.fit) 
+clin_fit$uci<-clinical_GAM$family$linkinv(clin_fit$uci )
+clin_fit$lci<-clinical_GAM$family$linkinv(clin_fit$lci )
+clin_fit$est<- clinical_GAM$family$linkinv(clin_fit$fit)
+
+clin_pop_plot<- ggplot(clin_fit, aes(x=year, y= est, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)), size=1)+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.2, color=NA)+
+  facet_grid(site~org)+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+
+#### BSI GAM
+bsi_pop <- otherpops_ed1 %>% filter(site=="BSI")
+
+# "ordered factor" GAM to identify between population differences
+bsi_GAM <- gam(carb_IR/tested ~ opop*oorg+s(year)+s(year,by=oorg, k=-1, bs="tp",m=2)+s(year,by=opop, k=-1, bs="tp",m=2), data =  bsi_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(bsi_GAM)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+concurvity(popViz, full=FALSE)
+AIC(popViz)
+BIC(popViz)
+
+acf_resid(bsi_GAM, split_pred=list(pop= bsi_pop$opop, site=bsi_pop$osite),n=6)
+(valRho <- acf(resid(bsi_GAM), plot=FALSE)$acf[2])
+
+# Random smooths approach
+bsi_GAM1 <- gam(carb_IR/tested ~ s(year, pop, k=-1, bs="fs",m=1)+ s(year, org, k=-1, bs="fs",m=1), data =  bsi_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(bsi_GAM1)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+concurvity(popViz, full=FALSE)
+AIC(popViz)
+BIC(popViz)
+
+acf_resid(bsi_GAM1, split_pred=list(pop= bsi_pop$opop, site=bsi_pop$osite),n=6)
+(valRho <- acf(resid(bsi_GAM2), plot=FALSE)$acf[2])
+
+
+# Smooth by Interaction of factors
+BSI_GAM2 <- gam(carb_IR/tested ~ opop*oorg+ s(year,by=interaction(oorg,opop), k=-1), data =  clin_pop, weights = tested, family = binomial(link="logit"))
+
+popViz <- getViz(BSI_GAM2)
+summary(popViz)
+check(popViz)
+print(plot(popViz, allTerms = T), pages = 1)
+concurvity(popViz, full=TRUE)
+AIC(popViz)
+BIC(popViz)
+
+# gather and plot predicted values
+bsi_fit<- cbind(bsi_pop, predict.gam(bsi_GAM2,
+                  se.fit=TRUE, type = "link")) 
+bsi_fit$uci<-bsi_fit$fit + (2 * bsi_fit$se.fit) 
+bsi_fit$lci<-bsi_fit$fit - (2 * bsi_fit$se.fit) 
+bsi_fit$uci<-bsi_GAM$family$linkinv(bsi_fit$uci )
+bsi_fit$lci<-bsi_GAM$family$linkinv(bsi_fit$lci )
+bsi_fit$est<- bsi_GAM$family$linkinv(bsi_fit$fit)
+
+bsi_pop_plot<- ggplot(bsi_fit, aes(x=year, y= est, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)))+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.2, color=NA)+
+  facet_grid(site~org)+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+##### Summary plots #########
+bysite_pop_fit<-rbind(bsi_fit, clin_fit)
+
+bysite_pop_plot <- ggplot(bysite_pop_fit, aes(x=year, y= fit, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)), size=1)+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.1,
+              color=NA)+facet_grid(org~site, scales="free_y")+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+byorg_pop_fit<-rbind(kp_pop_fit, pa_pop_fit, ab_pop_fit)
+
+byorg_pop_plot <- ggplot(byorg_pop_fit, aes(x=year, y= fit, color=pop, fill=pop))+
+  geom_point(aes(x=year, y=(carb_IR/tested)), size=1)+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.1,
+              color=NA)+facet_grid(org~site, scales="free_y")+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+byorg_pop_fit_ed <- byorg_pop_fit %>% filter(pop =="Modena"| pop =="Emilia-Romagna (other)")
+
+byorg_pop_plot2 <- ggplot(byorg_pop_fit_ed, aes(x=year, y= fit, color=site, fill=site))+
+  geom_line(aes(x=year, y=est))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), alpha=0.2,
+              color=NA)+facet_grid(org~pop, scales="free_y")+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="%I/R", labels=scales::percent_format(accuracy=1))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin = 0.2, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.2, end=0.8)
+
+byorg_pop_plot
+bysite_pop_plot
+byorg_pop_plot2
+```
+
+### 2.1.2 Quantify differences
+```{r, messages =FALSE, warning=FALSE}
+
+## Were "BSI" trends significantly different from clinical?
+
+# Diffs for K.pneumoniae
+kpdiff_modena <- plot_diff(kp_pop_GAM2, view="year", comp=list(osite=c('BSI', 'All clinical')), cond=list(opop="Modena"), n.grid=1000, plot_all="site", rm.ranef=FALSE, rug=FALSE, sim.ci=TRUE, plot=FALSE)
+
+kp_mod_clinical <- get_predictions(kp_pop_GAM2,
+cond=list(opop ='Modena', osite= "All clinical", year=seq(2008,2018,length=1000)),
+rm.ranef=FALSE, sim.ci=TRUE)
+
+kp_diff_mod <- left_join(kp_mod_clinical, kpdiff_modena, by="year")
+
+kp_diff_mod <-kp_diff_mod %>% mutate(
+  differences = plogis(fit+est)-plogis(fit),
+  lci = plogis(fit+est-sim.CI.y)-plogis(fit),
+  uci = plogis(fit+est+sim.CI.y)-plogis(fit),
+  clinical_fit = plogis(fit),
+  clinical_lci = plogis(fit-sim.CI.x),
+  clinical_uci = plogis(fit+sim.CI.x),
+  BSI_fit = plogis(fit+est),
+  BSI_lci = plogis((fit+est)-sim.CI.y),
+  BSI_uci = plogis((fit+est)+sim.CI.y),
+  mean_fit = (clinical_fit+BSI_fit)/2,
+  organism = "K.pneumoniae",
+  partial_diffs = plogis(fit+(est+0.44035))-plogis(fit)
+)
+
+# Diffs for P.aeurginosa
+padiff_modena <- plot_diff(pa_pop_GAM2, view="year", comp=list(osite=c('BSI', 'All clinical')), cond=list(opop="Modena"), n.grid=1000, plot_all="site", rm.ranef=FALSE, rug=FALSE, sim.ci=TRUE, plot=FALSE)
+
+pa_mod_clinical <- get_predictions(pa_pop_GAM2,
+cond=list(opop ='Modena', osite= "All clinical", year=seq(2008,2018,length=1000)),
+rm.ranef=FALSE, sim.ci=TRUE)
+
+pa_diff_mod <- left_join(pa_mod_clinical, padiff_modena, by="year")
+
+pa_diff_mod <-pa_diff_mod %>% mutate(
+  differences = plogis(fit+est)-plogis(fit),
+  lci = plogis(fit+est-sim.CI.y)-plogis(fit),
+  uci = plogis(fit+est+sim.CI.y)-plogis(fit),
+  clinical_fit = plogis(fit),
+  clinical_lci = plogis(fit-sim.CI.x),
+  clinical_uci = plogis(fit+sim.CI.x),
+  BSI_fit = plogis(fit+est),
+  BSI_lci = plogis((fit+est)-sim.CI.y),
+  BSI_uci = plogis((fit+est)+sim.CI.y),
+  mean_fit = (clinical_fit+BSI_fit)/2,
+  organism = "P.aeruginosa",
+  partial_diffs = plogis(fit+est-0.04075)-plogis(fit)
+)
+
+# Diffs for A.baumannii
+abdiff_modena <- plot_diff(ab_pop_GAM2, view="year", comp=list(osite=c('BSI', 'All clinical')), cond=list(opop="Modena"), n.grid=1000, plot_all="site", rm.ranef=FALSE, rug=FALSE, sim.ci=TRUE, plot=FALSE)
+
+ab_mod_clinical <- get_predictions(ab_pop_GAM2,
+cond=list(opop ='Modena', osite= "All clinical", year=seq(2008,2018,length=1000)),
+rm.ranef=FALSE, sim.ci=TRUE)
+
+ab_diff_mod <- left_join(ab_mod_clinical, abdiff_modena, by="year")
+
+ab_diff_mod <-ab_diff_mod %>% mutate(
+  differences = plogis(fit+est)-plogis(fit),
+  lci = plogis(fit+est-sim.CI.y)-plogis(fit),
+  uci = plogis(fit+est+sim.CI.y)-plogis(fit),
+  clinical_fit = plogis(fit),
+  clinical_lci = plogis(fit-sim.CI.x),
+  clinical_uci = plogis(fit+sim.CI.x),
+  BSI_fit = plogis(fit+est),
+  BSI_lci = plogis((fit+est)-sim.CI.y),
+  BSI_uci = plogis((fit+est)+sim.CI.y),
+  mean_fit = (clinical_fit+BSI_fit)/2,
+  organism = "A.baumannii",
+  partial_diffs = plogis(fit+est+0.13839)
+)
+
+# Final plots
+diffmods <- rbind(pa_diff_mod, kp_diff_mod, ab_diff_mod)
+diffmods_long <- diffmods %>% pivot_longer(cols=c(BSI_fit,BSI_lci,BSI_uci, clinical_fit, clinical_lci, clinical_uci), names_to=c("site",".value"),
+                                           names_pattern="(.)_(.*)")
+
+modena_compare<- ggplot(data=diffmods, aes(x=year,y=clinical_fit))+
+  geom_line(color="#fd9668")+
+  geom_hline(yintercept=0, linetype="dashed", color="grey")+
+  geom_ribbon(aes(ymin=(clinical_lci),
+                  ymax=(clinical_uci)), 
+              fill="#fd9668", alpha=0.1)+
+  geom_line(aes(x=year, y=BSI_fit), color="#440f76")+
+  geom_ribbon(aes(ymin=(BSI_lci), ymax=(BSI_uci)), 
+              alpha=0.1, fill="#440f76")+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name = "%I/R", breaks=seq(0,1,0.1),
+                     labels=scales::percent_format(accuracy=1))+
+  facet_grid(organism~., scales="free_y")+
+  theme_pnaat()
+
+modena_totaldiffs<- ggplot(data=diffmods, aes(x=year,y=differences))+
+  geom_line(color="#cd4071")+
+  geom_hline(yintercept=0, linetype="dashed", color="grey")+
+  geom_ribbon(aes(ymin=(lci),
+                  ymax=(uci)), alpha=0.1, fill="#cd4071")+
+  scale_x_continuous(name="Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name = "Total difference in %I/R (BSI vs. All Clinical)",   breaks=seq(-5,5,0.1), limits=c(-0.15,0.45),
+labels=scales::percent_format(accuracy=1))+
+  facet_grid(organism~.)+
+  theme_pnaat()
+
+
+gridPrint(
+plot(sm(kppopViz,3)) + l_fitLine(colour = "red") +l_rug(mapping = aes(x, y), alpha= 0.8)+ l_ciPoly(mul=2, fill = "blue", alpha = 0.1)+
+    l_points(shape = 19, size = 1, alpha = 0.1),
+plot(sm(papopViz, 3))+ l_fitLine(colour = "red") +l_rug(mapping = aes(x, y), alpha= 0.8)+l_ciPoly(mul=2, fill = "blue", alpha = 0.1)+
+    l_points(shape = 19, size = 1, alpha = 0.1),
+plot(sm(abpopViz, 3))+ l_fitLine(colour = "red") +l_rug(mapping = aes(x, y), alpha= 0.8)+l_ciPoly(mul=2, fill = "blue", alpha = 0.1)+
+    l_points(shape = 19, size = 1, alpha = 0.1))
+
+plot_diff(kp_pop_GAM2, view="year",         
+        comp=list(osite=c("BSI", "All clinical")),
+        main='Time difference Adults-Children')
+plot_diff(pa_pop_GAM2, view="year",         
+        comp=list(osite=c("BSI", "All clinical")),
+        main='Time difference Adults-Children')
+plot_diff(ab_pop_GAM2, view="year",         
+        comp=list(osite=c("BSI", "All clinical")),
+        main=NULL)
+
+
+modena_compare + modena_totaldiffs
+
+
+partial_kp2 + partial_pa2 +partial_ab2
+
+gridPrint(ck1, ck2, ncol = 2)
+gridPrint(plot(sm(b, 1)) + l_fitRaster() + l_fitContour() + labs(title = NULL) + guides(fill=FALSE),
+          plot(pterm(b, 1)) + l_ciPoly() + l_fitLine(), ncol = 2)
+```
+
 
 # 3. ARIMAs
-Required for the following:
+In addition to time-series decomposition applied to all variables (to facilitate descriptive statistics) we further characterised key time-series, including:
 
-* Main outcomes (crpa hca clinical, crpa conothca clinical, crkp hca clinical, crkp conothca clinical, crab hca clinical, crab conothca clinical )
-* Antibiotic time-series (for counterfactuals)
-* gmneg_all_bsi (all gram neg bloodstream isolates, should predict abx use series)
-* ecoliccs_all_bsi (all carbapenem and cephalosporin sensitive E.coli BSI, should predict abx use series)
-* ecoli3gcr_all_bsi (3GC resistant E.coli BSI, should predict antibiotic use)
-* abhr (for counterfactuals)
+* Primary outcomes
+* Antibiotic time-series - for counterfactuals
+* Other infection time-series driving antibiotic use
 
-```{r}
-# 1. ARIMAs for main outcomes
+
+## 3.1 Primary outcomes
+The primary study outcomes of interest are:
+
+* crpa hca clinical, 
+* crpa conothca clinical, 
+* crkp hca clinical, 
+* crkp conothca clinical, 
+* crab hca clinical, 
+* crab conothca clinical
+
+### 3.1.1 Redefine timeseries datasets for ARIMAs
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Redefine clean time-series as a tsibble
 tswide_clean <- wide_clean %>% mutate(tsmonth = yearmonth(date)) %>% as_tsibble(index = tsmonth)
 
-## 1.1 CRKp clinical time series 
-### 1.1.1 Whole time series
-tswide_clean %>% autoplot(crkp_ho_clinical)   # Plot the data
-tswide_clean %>% gg_tsdisplay(crkp_ho_clinical, "partial") # Plot the data, ACF, PACF
-tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical), "partial")  # Plot differenced data, ACF, PACF
+# Derive pre-intervention time-series
+ts_p1_pre_ihh_itargscr <- tswide_clean %>% filter (phase <=1)
+ts_p2_pre_icarba <- tswide_clean %>% filter (phase <=2)
+ts_p3_pre_iabs_iunivscr <- tswide_clean %>% filter (phase <=3)
 
-tswide_clean %>% features(crkp_ho_clinical, unitroot_kpss)  # unit root test (?stationary)
-tswide_clean %>% features(crkp_ho_clinical, unitroot_ndiffs) # Num of recommended differencing
-tswide_clean %>% features(crkp_ho_clinical, unitroot_nsdiffs,.period=12) #Num of recommended seasonal differencing
-
-lambda<-guerrero(tswide_clean$crkp_ho_clinical, .period=12L)  #Lambda for Box-Cox transformation
-tswide_clean$crkp_ho_clinical_bc <- (((tswide$crkp_ho_clinical)^lambda)-1)/lambda
-
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_kpss) # unit root test for transformed variable
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_ndiffs) # Num of recommended differencing for transformed data
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_nsdiffs,.period=12) #Num of recommended seasonal differencing for transformed data
-tswide_clean %>% gg_tsdisplay(crkp_ho_clinical_bc, "partial") # Plot the transformed data, ACF, PACF
-tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical_bc), "partial")  # Plot differenced transformed data, ACF, PACF
-
-arima_crkp_ho <- tswide_clean %>% model(
-  arima_crkp_ho_111 = ARIMA(crkp_ho_clinical ~ pdq(1,1,1)),
-  stepwise_crkp_ho = ARIMA(crkp_ho_clinical)) # fit best manual and auto ARIMA with default approach for NON-TRANSFORMED DATA
-
-glance(arima_crkp_ho) %>% arrange(AICc) %>% select(.model:BIC)
-arima_crkp_ho  %>% select(arima_crkp_ho_111) %>% gg_tsresiduals() # compare models
-arima_crkp_ho %>% select(stepwise_crkp_ho) %>% gg_tsresiduals() # compare models
-
-
-
-arima_crkp_ho_bc <- tswide_clean %>% model(
-  arima_crkp_ho_bc_111 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,1,1)),
-  arima_crkp_ho_bc_011 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,1,1)),
-  stepwise_crkp_ho_bc = ARIMA(crkp_ho_clinical_bc)) # fit best manual and auto ARIMA with default approach for TRANSFORMED data
-
-glance(arima_crkp_ho_bc) %>% arrange(AICc) %>% select(.model:BIC)
-arima_crkp_ho_bc  %>% select(arima_crkp_ho_bc_111) %>% gg_tsresiduals() # compare models
-arima_crkp_ho_bc %>% select(stepwise_crkp_ho_bc) %>% gg_tsresiduals() # compare models
-
-
-augment(arima_crkp_ho) %>% 
-  filter(.model=='arima_crkp_ho_111') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
-
-augment(arima_crkp_ho) %>% 
-  filter(.model=='stepwise_crkp_ho_bc') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
-
-fable::
-
-## 1.2 Pre intervention only
-
-
-WWWusage %>% forecast::forecast() %>% plot()
-
-
-
-# some example Cross-correlation functions 
-## Between Gram-negative BSI and use of antibiotics
-ccf(tswide_clean$gmneg_all_bsi,tswide_clean$cephalosporins_DDD)
-
-## Between antibiotic use and CROs
-### Klebsiella pneumoniae
-ccf(tswide_cl_pre$carbapenems, tswide_cl_pre$crkp_hca_clinical)
+##### auto arima function for reference
 
 auto.arima.df <- function(data, y, ...){
     y <- enquo(y)
@@ -233,22 +728,204 @@ auto.arima.df <- function(data, y, ...){
         as.ts()
     auto.arima(yts, ...)
 }
-newabx.matrix<-rep(0,132)
-for(i in 1:length(tswideabx[1,])){
-abx<- tswideabx[,i]
-newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
-newabx.matrix <-cbind(newabx.matrix, newabx)
-}
-newabx.matrix<-newabx.matrix[,-1]
 
-colnames(newabx.matrix)<-c(paste0(colnames(tswideabx)))
-tswide_clean <-tswide %>% dplyr::select(!c(obd,bedocc,
-abhr:fluoroquinolones))
-tswide_clean <- cbind(tswide_clean, newabx.matrix) %>% as_tsibble(index = tsmonth)
+```
+
+### 3.1.2 HCA-CRKp clinical infections (*crkp hca clinical*)
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+#### Plot data, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crkp_ho_clinical, "partial") 
+
+#### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crkp_ho_clinical, unitroot_kpss)
+tswide_clean %>% features(crkp_ho_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_ho_clinical, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crkp_ho_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crkp_ho_clinical_bc <- (((tswide$crkp_ho_clinical)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crkp_ho_clinical_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_kpss)
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_ndiffs)
+tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_nsdiffs,.period=12) 
+
+tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical_bc), "partial")  
+
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED DATA
+arima_crkp_ho <- tswide_clean %>% model(
+  arima_crkp_ho_101 = ARIMA(crkp_ho_clinical ~ pdq(1,0,1)),
+  stepwise_crkp_ho = ARIMA(crkp_ho_clinical)) 
+
+glance(arima_crkp_ho) %>% arrange(AICc) %>% select(.model:BIC)
+arima_crkp_ho  %>% select(arima_crkp_ho_101) %>% gg_tsresiduals() # compare models
+arima_crkp_ho %>% select(stepwise_crkp_ho) %>% gg_tsresiduals() # compare models
+
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crkp_ho_bc <- tswide_clean %>% model(
+  arima_crkp_ho_bc_111 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,1,1)),
+  arima_crkp_ho_bc_101_100 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,0,1) + PDQ(1,0,0)),
+    arima_crkp_ho_bc_011_100 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,1,1) + PDQ(1,0,0)),
+  arima_crkp_ho_bc_101 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,0,1)),
+  arima_crkp_ho_bc_001 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,0,1)),
+  stepwise_crkp_ho_bc = ARIMA(crkp_ho_clinical_bc)) 
+
+glance(arima_crkp_ho_bc) %>% arrange(AICc) %>% select(.model:BIC)
+
+arima_crkp_ho_bc  %>% select(arima_crkp_ho_bc_011_100) %>% gg_tsresiduals() # compare models
+arima_crkp_ho_bc %>% select(stepwise_crkp_ho_bc) %>% gg_tsresiduals() # compare models
+
+#### Check portmanteau tests of best fit option
+augment(arima_crkp_ho_bc) %>% 
+  filter(.model=='arima_crkp_ho_bc_011_100') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+
 
 
 ```
 
+### 3.1.3 HCA-CRAb clinical infections (*crab hca clinical*)
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+#### Plot data, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crab_ho_clinical, "partial") 
+
+#### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crab_ho_clinical, unitroot_kpss)
+tswide_clean %>% features(crab_ho_clinical, unitroot_ndiffs)
+tswide_clean %>% features(crab_ho_clinical, unitroot_nsdiffs,.period=12)
+tswide_clean %>% gg_tsdisplay(difference(crab_ho_clinical), "partial") 
+
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crab_ho_clinical, .period=12L)
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crab_ho <- tswide_clean %>% model(
+  arima_crab_ho_111 = ARIMA(crab_ho_clinical ~ pdq(1,1,1)),
+  arima_crab_ho_011 = ARIMA(crab_ho_clinical ~ pdq(0,1,1)),
+  arima_crab_ho_110 = ARIMA(crab_ho_clinical ~ pdq(1,1,0)),
+  arima_crab_ho_101 = ARIMA(crab_ho_clinical ~ pdq(1,0,1)),
+  stepwise_crab_ho = ARIMA(crab_ho_clinical))
+
+glance(arima_crab_ho) %>% arrange(AICc) %>% select(.model:BIC)
+
+# check the residuals of best models to ensure white noise.
+arima_crab_ho  %>% select(arima_crab_ho_011) %>% gg_tsresiduals() 
+arima_crab_ho %>% select(arima_crab_ho_101) %>% gg_tsresiduals()
+
+#### Check portmanteau tests of best fit option
+augment(arima_crab_ho) %>% 
+  filter(.model=='arima_crab_ho_011') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+
+
+```
+
+### 3.1.4 HCA-CRPa clinical infections (*crpa hca clinical*)
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+#### Plot data, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crpa_ho_clinical, "partial")
+
+#### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crpa_ho_clinical, unitroot_kpss)
+tswide_clean %>% features(crpa_ho_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crpa_ho_clinical, unitroot_nsdiffs,.period=12) 
+
+tswide_clean %>% gg_tsdisplay(difference(crpa_ho_clinical), "partial") 
+crpa_ho_clin_diff1 <-  tsibble::difference(tswide_clean$crpa_ho_clinical, lag =1, differences = 1)
+tswide_clean %>% gg_tsdisplay(crpa_ho_clin_diff1, "partial")
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+tswide_clean <- tswide_clean %>% dplyr::mutate(crpa_ho_clin_diff1 = replace_na(crpa_ho_clin_diff1, 0))
+tswide_clean <- tswide_clean %>% dplyr::mutate(new_crpa_ho_clin_diff1 = crpa_ho_clin_diff1+10)
+boxcoxnc(tswide_clean$new_crpa_ho_clin_diff1, method = "sw", lambda2 = 10)
+
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_kpss)
+tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_ndiffs)
+tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_nsdiffs, .period=12)
+
+#### Fit best manual and auto ARIMA
+arima_crpa_ho <- tswide_clean %>% model(
+  arima_crpa_ho_111 = ARIMA(crpa_ho_clinical ~ pdq(1,1,1)),
+  arima_crpa_ho_011 = ARIMA(crpa_ho_clinical ~ pdq(0,1,1)),
+  arima_crpa_ho_101 = ARIMA(crpa_ho_clinical ~ pdq(1,0,1)),
+  stepwise_crpa_ho = ARIMA(crpa_ho_clinical)) 
+
+glance(arima_crpa_ho) %>% arrange(AICc) %>% select(.model:BIC)
+
+#### Examine residuals of ARIMA to check correct identification
+arima_crpa_ho  %>% select(arima_crpa_ho_011) %>% gg_tsresiduals()
+arima_crpa_ho %>% select(arima_crpa_ho_101) %>% gg_tsresiduals()
+arima_crpa_ho %>% select(stepwise_crpa_ho) %>% gg_tsresiduals() 
+
+#### Check portmanteau tests of best fit option
+augment(arima_crpa_ho) %>% 
+  filter(.model=='arima_crpa_ho_101') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+```
+
+## 3.2 Antibiotic and IPC time series
+```{r}
+
+# Nb: we use the pre-intervention dataset "ts_p2_pre_icarba" for fitting the baseline ARIMA with exogenous variables (ARIMAX) for carbapenems. For other antibiotics we should use the  "ts_p3_pre_iabs_iunivscr" data
+pre_icarba <- ts_p2_pre_icarba %>% as_tsibble(index="date")
+pre_iabs <- ts_p3_pre_iabs_iunivscr %>% as_tsibble(index="date")
+
+
+
+```
+## 3.3 Influential infection time-series
+These time-series are expected to be related to antibiotic use in the population. Bidirectional relationships may exist but we hypothesised that hospital-wide use of important antibiotic exposures driving carbapenem resistance may be responsive to the following:
+
+* All gram-negative bloodstream isolates (BSIs) (*gmneg_all_bsi*)
+* Carbapenem and cephalosporin sensitive E.coli BSI (*ecoliccs_all_bsi*)
+* 3rd generation cephalosporins resistant E.coli BSI (*ecoli3gcr_all_bsi*)
+
+### 3.3.1 Gram-Neg BSIs
+```{r}
+### Carbapenems######################
+
+# Prepare differenced time-series
+pre_icarba$gmneg_diff <-  tsibble::difference(pre_icarba$gmneg_all_bsi, lag =1, differences = 1)
+pre_icarba$carbapenem_diff <-  tsibble::difference(pre_icarba$carbapenems, lag =1, differences = 1)
+pre_icarba_ed2 <- pre_icarba [2:72,] %>% as_tsibble(index="date")
+pre_icarba_ed4 <- pre_icarba [4:72,] %>% as_tsibble(index="date")
+
+# Explore cross-correlations with raw data
+CCF(pre_icarba, carbapenems, gmneg_all_bsi, lag_max=24) %>% autoplot(level=95)
+
+# Explore cross-correlations with differenced data
+CCF(pre_icarba_ed2, carbapenem_diff, gmneg_diff, lag_max=24)%>% autoplot(level=95)
+
+# Identify an ARIMAX model for carbapenems 
+carba_pre1 <- pre_icarba %>% model(ARIMA(carbapenems  ~ -1 + pdq(0,1,1)+PDQ(0,0,0)+lag(gmneg_all_bsi,2)))
+report(carba_pre1)
+carba_pre1 %>%  gg_tsresiduals() 
+
+carba_pre2 <- pre_icarba_ed2 %>% model(ARIMA(carbapenems  ~ -1 + pdq(0,1,1)+PDQ(0,0,0)+lag(gmneg_diff,2)))
+report(carba_pre2)
+carba_pre2 %>%  gg_tsresiduals() 
+
+# Looking at the correlation between gm neg BSI and differenced gm neg BSI (y-axis)
+gmneg_bsi<- pre_icarba$gmneg_all_bsi[1:71]
+differenced_gm_negbsi <- pre_icarba$gmneg_diff [2:72]
+gmneg <- cbind(gmneg_bsi,differenced_gm_negbsi )
+gmneg <-gmneg %>% as_tibble()
+cor(gmneg$gmneg_bsi, gmneg$differenced_gm_negbsi)
+ggplot(gmneg, aes(gmneg_bsi,differenced_gm_negbsi))+geom_point()
+
+```
 # 4. Interactions and VARs
 
 # 5. GAMs

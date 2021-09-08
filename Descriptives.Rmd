@@ -1,0 +1,695 @@
+---
+title: "Modena Time Series Analysis"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  word_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+# Introduction
+This R notebook provides code to reproduce results for the paper *Effects of antimicrobial stewardship and infection prevention and control on the incidence of carbapenem resistant gram-negative infections in Modena, Italy: a non-linear time-series analysis*. 
+It requires installing of necessary packages
+
+
+Data and code are available at the Github repository
+[via this link](https://github.com/TimLawes/modena_carbapenem_resistance)
+
+# 1. Preliminaries
+## 1.1 Install copies of required packages to private library
+```{r  message=FALSE, warning=FALSE, results='hide'}
+
+# Install renv for private package library if not available
+if(!require(renv)){
+    install.packages("renv")
+}
+
+Sys.setenv(LOCALAPPDATA=renv::paths$library())
+renv::restore()
+renv::activate()
+
+```
+
+## 1.2 Load required packages and customised plot theme
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+library(tidyverse) # to enable tidyverse functions
+library(earth) # for MARS
+library(tseries) # for working with TS data
+library(tsutils) #
+library(forecast) # for forcasting
+library(fpp3) # enables tsibble, and fable packages
+library(plotmo) # plotting MARS model from earth
+library(mgcv) # for GLM and GAM models
+library(itsadug) # additional functions for GAM and GAMM models
+library(gratia) # plotting of GAMs and simultaneous CI estimation
+library(smooth)
+library(lmtest) # comparing models 
+library(stats)
+library(grid)
+library(lattice)
+library(viridis) # for viridis colour palettes
+library(hrbrthemes) #for plot themes
+library(sysfonts) # for using google fonts
+library(lubridate) # for working with datetime variables
+library(car) # for Cook's distances
+library(strucchange) # for detecting structural changes in time-series
+library(ganttrify) # for time lines (Gantt type)
+library(patchwork) # for combining different plot types
+library(missForest) # for missing value imputation by random forest
+library(mgcViz) # for plots and model checks of GAM
+source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
+source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing
+
+source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth differences from an Xp matrix 
+
+```
+
+## 1.3 Load data and process
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+# Read in the main data 
+main <- read_csv ("modena_carbapenem.csv", show_col_types =FALSE)
+date <- tibble(date = as.Date("2008-01-01")+0:131)
+main <- cbind(date,main) %>% dplyr::select(!c(months, study_m))
+
+# Create wide as a time-series indexed table (tsibble)
+tswide <- main %>% mutate(
+  across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
+  across(abhr: fluoroquinolones, ~./obd*1000))  %>% 
+  as_tsibble(index = date)
+
+```
+
+## 1.4 Outlier detection and time-series cleaning
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+# outlier detection and replacement with cleaned values
+wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obd, bedocc,
+abhr:fluoroquinolones)
+
+newabx.matrix<-rep(0,132)
+for(i in 1:length(wide_clean[1,])){
+abx<- wide_clean[,i]
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx.matrix <-cbind(newabx.matrix, newabx)
+}
+newabx.matrix<-newabx.matrix[,-1]
+
+colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
+tmp <-main %>% dplyr::select(!c(date, obd,bedocc,
+abhr:fluoroquinolones))
+tswide_clean <- cbind(tmp, newabx.matrix) %>% as_tsibble(index=date)
+rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
+
+```
+
+
+## 1.5 Trend decomposition
+```{r message=FALSE, warning=FALSE, results='hide'}
+# create long format data for incidence
+
+tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") 
+tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
+tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
+
+tslong_bugs <- tslong_incid %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+
+tslongbugs2<- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
+
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
+                                 season(window =13), robust = TRUE)) %>%
+      components()
+    data <-cbind(data,tmpd[,3:6])
+}
+
+ts_decomp <- tslongbugs2 %>% 
+    mutate(decs = map(data, decompose, y = incidence)) %>%
+    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
+
+
+```
+
+
+#  2 Regional & national trends
+
+## 2.1 preparation of data
+```{r  message=FALSE, warning=FALSE,  results='hide', cache= TRUE}
+
+# Prepare data
+otherpops <- read_csv("populations_year.csv", col_types = cols(
+  pop = col_factor(),
+  org = col_factor(),
+  year = col_integer(),
+  site = col_factor(),
+  num_ts=col_factor()))
+
+
+otherpops <-otherpops %>% filter(studyp==1 & carb_R != "NA") %>%
+  mutate(pop1 = pop)
+otherpops$pop1 <- as_factor(otherpops$pop1) 
+otherpops$pop1 <- fct_recode(otherpops$pop1, M="Modena", ER = "Emilia-Romagna", ERo = "Emilia-Romagna (other)", I = "Italy")
+otherpops <- otherpops %>% mutate(
+    poporg = interaction(pop1, org), 
+         sitepop = interaction(site,pop1))
+otherpops$poporg <-as_factor(otherpops$poporg)
+otherpops$sitepop <-as_factor(otherpops$sitepop)
+
+#### Data for evaluating number tested by population
+otherpops_num <- otherpops %>% filter(pop!="Emilia-Romagna") %>%
+  dplyr::select(year:tested) %>% pivot_longer (cols= c(carb_S, carb_I, carb_R),
+                     names_to = "Susceptibility", values_to = "Number")
+
+otherpops_num$Susceptibility<- as_factor(otherpops_num$Susceptibility)%>% fct_recode(R = "carb_R", I = "carb_I", S="carb_S")
+otherpops_num$pop<- fct_recode(otherpops_num$pop, "ER other" =  "Emilia-Romagna (other)")
+
+
+
+#### Data for regional isolate results
+
+otherpops_pc <- otherpops %>% filter(
+  pop=="Modena"| pop=="Emilia-Romagna") %>%
+  dplyr::select(year:carb_SI) %>% 
+  rename(SI = "carb_SI", R = "carb_R")
+
+otherpops_pc <- otherpops_pc %>% pivot_wider(id_cols=c(year,org,site),
+                names_from = pop, values_from=c(R, SI))
+
+otherpops_pc <- otherpops_pc %>% pivot_longer(
+  cols=c("R_Modena","SI_Modena", "R_Emilia-Romagna",
+         "SI_Emilia-Romagna"),
+  names_to=c("Susceptibility",".value"), values_to = "popn",
+  names_pattern=("(.*)_(.*)"))
+
+otherpops_pc$Susceptibility <- as_factor(otherpops_pc$Susceptibility)
+
+otherpops_pc <- otherpops_pc %>% mutate(
+  total = Modena+`Emilia-Romagna`, 
+  pc = Modena / total, 
+  siteorg = interaction(site,org))
+
+```
+
+
+## 2.2 Number tested and Percentage of all isolates within 
+```{r  message=FALSE, warning=FALSE,  results='hide', cache= TRUE}
+
+
+#### GAM model of % IR or S All clinical isolates in region from Modena
+gdclinical <- otherpops_pc %>% filter(site == "All clinical")
+
+pcregion_GAM <- gam(Modena/`Emilia-Romagna`~ org*Susceptibility+ s(year, by=interaction(Susceptibility,org),
+                    m=1, k=-1, bs="tp"), 
+                    data = gdclinical, weights = total, 
+                    family = binomial(link="logit"), method="REML")
+
+# get model summary
+pcregionViz <- getViz(pcregion_GAM)
+summary.gam(pcregion_GAM)  
+BIC(pcregionViz)
+
+
+# standard model fit diagnostics
+appraise(pcregion_GAM, method= "simulate", n_simulate = 1000, type = "deviance", level=0.9, point_col = "steelblue", point_alpha = 0.4,  ci_alpha = 0.1)
+
+# check for adequacy of basis dimension.
+k.check(pcregion_GAM)
+
+# checks for autocorrelation
+acf(resid(pcregion_GAM), plot=FALSE)$acf[2]
+
+# checks for concurvity
+concurvity(pcregionViz, full=TRUE)
+
+# collate model fits 
+pcregion_fit<- cbind(gdclinical, predict.gam(pcregion_GAM,
+                  se.fit=TRUE, type = "link")) 
+pcregion_fit$uci<-pcregion_fit$fit + (2 * pcregion_fit$se.fit) 
+pcregion_fit$lci<-pcregion_fit$fit - (2 * pcregion_fit$se.fit) 
+pcregion_fit$uci<-pcregion_GAM$family$linkinv(pcregion_fit$uci )
+pcregion_fit$lci<-pcregion_GAM$family$linkinv(pcregion_fit$lci )
+pcregion_fit$est<- pcregion_GAM$family$linkinv(pcregion_fit$fit)
+
+pcregion_fit <- pcregion_fit %>% mutate(obs_pc = Modena/total)
+
+
+
+#### GAM model of % IR or S BSI in region from Modena
+# Filter data
+gdbsi <- otherpops_pc %>% filter(site == "BSI")
+
+pcregbsi_GAM <- gam(Modena/`Emilia-Romagna`~ org*Susceptibility+ s(year, by=interaction(Susceptibility,org),m=2, k=-1, bs="tp"), data = gdbsi, weights = total, family = binomial(link="logit"), method="REML")
+
+# get model summary
+pcregbsiViz <- getViz(pcregbsi_GAM)
+summary.gam(pcregbsi_GAM)  
+BIC(pcregbsiViz)
+
+# standard model fit diagnostics
+appraise(pcregbsi_GAM, method= "simulate", n_simulate = 1000, type = "deviance", level=0.9, point_col = "steelblue", point_alpha = 0.4,  ci_alpha = 0.1)
+
+# check for adequacy of basis dimension.
+k.check(pcregbsi_GAM)
+
+# checks for autocorrelation
+acf(resid(pcregbsi_GAM), plot=FALSE)$acf[2]
+
+# checks for concurvity
+concurvity(pcregbsiViz, full=TRUE)
+
+# collate model fits 
+pcregbsi_fit<- cbind(gdbsi, predict.gam(pcregbsi_GAM,
+                  se.fit=TRUE, type = "link")) 
+pcregbsi_fit$uci<-pcregbsi_fit$fit + (2 * pcregbsi_fit$se.fit) 
+pcregbsi_fit$lci<-pcregbsi_fit$fit - (2 * pcregbsi_fit$se.fit) 
+pcregbsi_fit$uci<-pcregbsi_GAM$family$linkinv(pcregbsi_fit$uci )
+pcregbsi_fit$lci<-pcregbsi_GAM$family$linkinv(pcregbsi_fit$lci )
+pcregbsi_fit$est<- pcregbsi_GAM$family$linkinv(pcregbsi_fit$fit)
+
+pcregbsi_fit <- pcregbsi_fit %>% mutate(obs_pc = Modena/total)
+pcregionall <- rbind(pcregbsi_fit, pcregion_fit)
+
+
+# Final plot for numbers reported
+ggplot(otherpops_num, 
+                      aes(year, Number, fill=Susceptibility))+
+  geom_col(colour=NA, alpha= 0.6)+
+  facet_grid(pop+site~org, scales="free_y")+
+  scale_y_continuous(name="Number of isolates tested")+
+  scale_x_continuous(name = "Year", breaks=seq(2008,2018,2))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin = 0.8, end=0.3)+
+  scale_fill_viridis_d(option="A", begin = 0.8, end=0.3)+
+  theme(axis.text.x = element_text(angle = 45, hjust =1))+
+  theme(legend.position = "top")+
+  theme(legend.title=element_text(size=9))
+
+# Plot for proportion of regional isolates occurring in Modena by susceptibility, organism, body site
+ggplot(pcregionall, aes(year, est, 
+  group= Susceptibility, fill=Susceptibility, color= Susceptibility))+
+  geom_line()+
+  geom_point(aes(year, pc))+
+  geom_ribbon(aes(x=year, ymin=lci, ymax=uci), color=NA, alpha=0.2)+
+  scale_x_continuous("Year", breaks=seq(2008,2018,2))+
+  facet_grid(site~org, scales="free_y")+
+  scale_y_continuous("% Regional isolates within S/IR group",
+                     labels=scales::percent_format(accuracy=1))+
+  scale_color_viridis_d(option="A", begin=0.3, end=0.8)+
+  scale_fill_viridis_d(option= "A", begin=0.3, end = 0.8)+
+  theme_pnaat()+
+  coord_cartesian(ylim=c(0, 0.3))+
+  theme(axis.text.x = element_text(angle = 45, hjust =1))+
+  theme(legend.position = "top")+
+  theme(legend.title=element_text(size=9))
+
+
+```
+
+
+## 2.3 GAMs by organism
+```{r message=FALSE, warning=FALSE, results='hide', cache= TRUE}
+
+####  K.pneumoniae ########################################
+
+## Filter data
+kp_pop <- otherpops %>% filter(org =="K.pneumoniae")
+
+## Model Smooth by Interaction of factors
+kp_pop_GAMx <- bam(carb_R/tested ~ s(sitepop,bs="re") + s(year,by=sitepop,m=2, k=-1, bs="tp"), data =  kp_pop, weights = tested, family = binomial(link="logit"), method="REML", rho=0.5, AR.start=kp_pop$start.event)
+
+# get model summary
+kppopVizx <- getViz(kp_pop_GAMx)
+summary.gam(kp_pop_GAMx)
+BIC(kppopVizx)
+
+# standard model fit diagnostics
+appraise(kp_pop_GAMx, method= "simulate", n_simulate = 1000, type = "deviance", level=0.9, point_col = "steelblue", point_alpha = 0.4,  ci_alpha = 0.1)
+
+# check for adequacy of basis dimension.
+k.check(kp_pop_GAMx)
+
+# checks for autocorrelation
+acf(resid(kp_pop_GAMx), plot=FALSE)$acf[2]
+
+# checks for concurvity
+concurvity(kppopVizx, full=TRUE)
+
+##### P.aeruginosa GAM ###################################
+
+## Filter data
+pa_pop <- otherpops %>% filter(org =="P.aeruginosa")
+
+# Model Smooth by Interaction of factors
+pa_pop_GAMx <- bam(carb_R/tested ~ s(sitepop,bs="re") + s(year,by=sitepop,m=2, k=-1, bs="tp"), data =  pa_pop, weights = tested, family = binomial(link="logit"), method="REML", rho=0.5, AR.start=pa_pop$start.event)
+
+# get model summary
+papopVizx <- getViz(pa_pop_GAMx)
+summary.gam(pa_pop_GAMx)  
+BIC(papopVizx)
+
+# standard model fit diagnostics
+appraise(pa_pop_GAMx, method= "simulate", n_simulate = 1000, type = "deviance", level=0.9, point_col = "steelblue", point_alpha = 0.4,  ci_alpha = 0.1)
+
+# check for adequacy of basis dimension.
+k.check(pa_pop_GAMx)  
+
+# checks for autocorrelation
+acf(resid(pa_pop_GAMx), plot=FALSE)$acf[2]
+
+# checks for concurvity
+concurvity(papopVizx, full=TRUE)
+
+
+##### A.baumannii GAM
+# data
+ab_pop <- otherpops %>% filter(org =="A.baumannii")
+
+# model
+ab_pop_GAMx <- gam(carb_R/tested ~ s(sitepop,bs="re") + s(year,by=sitepop,m=2, k=-1, bs="tp"), data =  ab_pop, weights = tested, family = binomial(link="logit"), method="REML")
+
+# get model summary
+abpopVizx <- getViz(ab_pop_GAMx)
+summary.gam(ab_pop_GAMx) 
+BIC(abpopVizx)
+
+# standard model fit diagnostics
+appraise(ab_pop_GAMx, method= "simulate", n_simulate = 1000, type = "deviance", level=0.9, point_col = "steelblue", point_alpha = 0.4,  ci_alpha = 0.1)
+
+# check for adequacy of basis dimension.
+k.check(ab_pop_GAMx)
+
+# checks for autocorrelation
+acf(resid(ab_pop_GAMx), plot=FALSE)$acf[2]
+
+# checks for concurvity
+concurvity(abpopVizx, full=TRUE)
+
+
+```
+
+## 2.4 Plot GAM predictions
+
+```{r message=FALSE, warning=FALSE, results='hide', cache= TRUE}
+
+names <- c("All clinical.M",  "BSI.M", 
+              "All clinical.ERo", 
+              "BSI.ERo", "BSI.I", 
+              "All clinical.ER", "BSI.ER")
+            
+#### Create data for fitting model predictions
+pdat <- expand.grid(
+  year= seq(2008, 2018, length = 264),
+  sitepop = names)
+
+
+#### Fit model predictions 
+kp_pred <- predict(kp_pop_GAMx, pdat, type="response", se.fit=TRUE)
+kp_pred <- cbind(kp_pred, pdat) %>% as_tibble() %>%
+  separate(sitepop, into=c("site1","pop2"), sep="[.]") %>%
+  mutate(org = "K.pneumoniae")
+
+pa_pred <- predict(pa_pop_GAMx, pdat, type="response", se.fit=TRUE)
+pa_pred <- cbind(pa_pred, pdat) %>% as_tibble() %>%
+  separate(sitepop, into=c("site1","pop2"), sep="[.]") %>%
+  mutate(org = "P.aeruginosa")
+
+ab_pred <- predict(ab_pop_GAMx, pdat, type="response", se.fit=TRUE)
+ab_pred <- cbind(ab_pred, pdat) %>% as_tibble()  %>%
+  separate(sitepop, into=c("site1","pop2"), sep="[.]") %>%
+  mutate(org = "A.baumannii")
+
+orgpreds <- rbind(kp_pred, pa_pred, ab_pred)
+rm(kp_pred, pa_pred, ab_pred)
+
+##### Prepare data for plots
+orgpredsed <- orgpreds %>% filter (pop2 !="ER")
+
+orgpredsed <- orgpredsed %>% mutate(
+  italyfit = fit, 
+  italyse = se.fit,
+  fit = ifelse(pop2 =="I" & year <2013 & org =="A.baumannii", 
+               NA, fit),
+  se.fit = ifelse(pop2 == "I" & year < 2013 & org == "A.baumannii",
+              NA, se.fit),
+  italyfit = ifelse(pop2 == "I" & year < 2013 & org == "A.baumannii",
+                    italyfit, NA),
+  italyse = ifelse(pop2 == "I" & year < 2013
+                         & org == "A.baumannii", italyse, NA))
+
+orgpredsed <- orgpredsed %>% mutate(
+  italyse =ifelse(italyse >1 | italyse <0, NA, italyse))
+
+orgpredsed <- orgpredsed %>% rename(Population = "pop2")
+orgpredsed$Population <- fct_recode(orgpredsed$Population, Modena="M", "Emilia-Romagna (other)"="ERo", "Emilia-Romagna"="ER", Italy="I")
+
+otherpops_ed3 <-otherpops %>% 
+  rename(Population= "pop", site1 = "site")%>% 
+  filter (Population != "Emilia-Romagna")
+
+
+# Plot of observed values and GAM predictions 
+ggplot(orgpredsed, aes(year, fit, color=Population, fill=Population))+
+  geom_line()+
+  geom_line(aes(year,italyfit), linetype = "dashed")+
+  geom_ribbon(aes(year, ymin=italyfit-(1.96*italyse),
+              ymax=italyfit+(1.96*italyse)), fill=NA, linetype="dotted")+
+  geom_point(data= otherpops_ed3, 
+             aes(x=year, y=pc_R))+
+  geom_ribbon(aes(year, ymin=fit-(1.96*se.fit),
+      ymax=fit+(1.96*se.fit)), alpha=0.2, color=NA)+
+  facet_grid(org~site1, scales="free_y")+
+  scale_x_continuous ("Year", breaks=seq(2008,2018,2))+
+  scale_y_continuous(name="% Carbapenem resistant (I/R)",
+             labels=scales::percent_format(accuracy=1),
+             limits=c(0,NA))+
+  scale_color_viridis_d(option="A", begin=0.8, end=0.2)+
+  scale_fill_viridis_d(option="A", begin = 0.8, end=0.2)+
+  theme_pnaat()+
+  theme(legend.title=element_text(size=9))+
+  theme(axis.text.x = element_text(angle = 45, hjust =1))+
+  theme(legend.position = "top")
+
+
+
+```
+
+
+## 2.5 Differences in resistance trends between populations
+```{r message=FALSE, warning=FALSE, results='hide', cache= TRUE}
+
+#### Between populations
+
+# K.pneumoniae
+MvER_all <- smooth_diff(kp_pop_GAMx, pdat, "All clinical.M", "All clinical.ERo", "sitepop") %>% mutate(re1 = -0.5451407, re2= -0.4564834)
+
+MvI_bsi <- smooth_diff(kp_pop_GAMx, pdat, "BSI.M", "BSI.I", "sitepop") %>% mutate(re1 = 0.3637846, re2= 0.7332048)
+
+MvER_bsi <- smooth_diff(kp_pop_GAMx, pdat, "BSI.M", "BSI.ERo", "sitepop")%>% mutate(re1 = 0.3637846, re2= 0.1554677)
+
+ERovsI_BSI <-smooth_diff(kp_pop_GAMx, pdat, "BSI.ERo", "BSI.I", "sitepop")%>%mutate(re1 = 0.1554677, re2= 0.7332048)
+
+ERovsER_all<-smooth_diff(kp_pop_GAMx, pdat, "All clinical.ERo", "All clinical.ER", "sitepop")%>% mutate(re1 = -0.4564834, re2= -0.442675)
+
+ERovsER_BSI <-smooth_diff(kp_pop_GAMx, pdat, "BSI.ERo", "BSI.ER", "sitepop") %>% mutate(re1 = 0.1554677, re2= 0.1918419)
+
+compkp <- cbind(date = seq(2008, 2018, length = 264),
+              rbind(MvER_all, MvI_bsi, MvER_bsi,ERovsI_BSI,
+                    ERovsER_BSI, ERovsER_all))
+
+compkp <- compkp %>% separate(col=pair, into=c("site1","pop1", "pop2"),
+                              sep = "[.]", remove = TRUE) %>%
+                      separate(col="pop1", into=c("pop1", "null"), 
+                               sep = "[-]", remove = TRUE) %>%
+                      dplyr::select(-"null") %>% mutate(org =
+                              "K.pneumoniae", reorg = -2.039596)
+
+# P.aeruginosa 
+MvER_all <- smooth_diff(pa_pop_GAMx, pdat, "All clinical.M", "All clinical.ERo", "sitepop") %>% mutate(re1 = -0.3030567, re2= -0.03286934)
+
+MvI_bsi <- smooth_diff(pa_pop_GAMx, pdat, "BSI.M", "BSI.I", "sitepop")%>% mutate(re1 = 0.05955559, re2= -0.0465038)
+
+MvER_bsi <- smooth_diff(pa_pop_GAMx, pdat, "BSI.M", "BSI.ERo", "sitepop") %>% mutate(re1 = 0.05955559, re2= -0.06386308)
+
+ERovsI_BSI <-smooth_diff(pa_pop_GAMx, pdat, "BSI.ERo", "BSI.I", "sitepop") %>% mutate(re1 = -0.06386308, re2= 0.4333925)
+
+ERovsER_all<-smooth_diff(pa_pop_GAMx, pdat, "All clinical.ERo", "All clinical.ER", "sitepop") %>% mutate(re1 = -0.03286934, re2= -0.0465038)
+
+ERovsER_BSI <-smooth_diff(pa_pop_GAMx, pdat, "BSI.ERo", "BSI.ER", "sitepop") %>% mutate(re1 = -0.06386308, re2= -0.04665511)
+
+comppa <- cbind(date = seq(2008, 2018, length = 264),
+              rbind(MvER_all, MvI_bsi, MvER_bsi,ERovsI_BSI,
+                    ERovsER_BSI, ERovsER_all))
+
+comppa <- comppa %>% separate(col=pair, into=c("site1","pop1", "pop2"),
+                              sep = "[.]", remove = TRUE) %>%
+                      separate(col="pop1", into=c("pop1", "null"), 
+                               sep = "[-]", remove = TRUE) %>% dplyr::select(-"null") %>% mutate(org = "P.aeruginosa", reorg = -1.378)
+
+
+# A.baumannii
+MvER_all <- smooth_diff(ab_pop_GAMx, pdat, "All clinical.M", "All clinical.ERo", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+
+MvI_bsi <- smooth_diff(ab_pop_GAMx, pdat, "BSI.M", "BSI.I", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+MvER_bsi <-smooth_diff(ab_pop_GAMx, pdat, "BSI.M", "BSI.ERo", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+ERovsI_BSI <-smooth_diff(ab_pop_GAMx, pdat, "BSI.ERo", "BSI.I", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+ERovsER_all<-smooth_diff(ab_pop_GAMx, pdat, "All clinical.ERo", "All clinical.ER", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+ERovsER_BSI <-smooth_diff(ab_pop_GAMx, pdat, "BSI.ERo", "BSI.ER", "sitepop") %>% mutate(re1 = 0, re2= 0)
+
+compab <- cbind(date = seq(2008, 2018, length = 264),
+              rbind(MvER_all, MvI_bsi, MvER_bsi,ERovsI_BSI,
+                    ERovsER_BSI, ERovsER_all))
+
+compab <- compab %>% separate(col=pair, into=c("site1","pop1",
+                "pop2"), sep = "[.]", remove = TRUE) %>%
+                separate(col="pop1", into=c("pop1", "null"), 
+                sep = "[-]", remove = TRUE) %>%
+                dplyr::select(-"null") %>% mutate(
+                  org = "A.baumannii", reorg= 1.299869)
+
+comppops <- rbind(compkp, comppa, compab)
+
+
+comppops$pop1 <- as_factor(comppops$pop1) %>% fct_recode(
+"ERo" = "Emilia")
+
+
+comppops <- comppops %>% mutate(Comparison = paste(pop1, "vs", pop2),
+            tdiff = diff+(re1-re2),
+            tlci = lower+(re1-re2),
+            tuci = upper+(re1-re2))
+
+comppops$Comparison <- as_factor(comppops$Comparison)
+comppops$Comparison <- fct_recode(comppops$Comparison, "Modena vs. Emilia-Romagna (other)"="M vs ERo", "Modena vs. Italy" = "M vs I", "Emilia-Romagna (other) vs. Italy"= "ERo vs I")
+
+comppops <- comppops %>% rename(year = "date")
+
+comppops <- left_join (comppops, orgpreds, by = c("org","pop2","site1","year")) 
+
+comppops <- comppops %>% mutate(
+  totdiff = plogis(tdiff+logit(fit))-fit,
+  totlci = plogis(tlci+logit(fit))-fit,
+  totuci = plogis(tuci+logit(fit))-fit)
+
+comppops <- comppops %>% mutate(
+  italytotdiff = totdiff, 
+  italylci = totlci,
+  italyuci = totuci,
+  totdiff = ifelse(pop2 =="I" & year <2012 & org =="A.baumannii", 
+               NA, totdiff),
+  totlci = ifelse(pop2 == "I" & year < 2012 & org == "A.baumannii",
+              NA, totlci),
+  totuci = ifelse(pop2 == "I" & year < 2012 & org == "A.baumannii",
+              NA, totuci),
+  italytotdiff = ifelse(pop2 == "I" & year < 2012 & org ==
+                          "A.baumannii",italytotdiff, NA),
+  italylci = ifelse(pop2 == "I" & year < 2012 & org ==
+                         "A.baumannii", italylci, NA),
+  italyuci = ifelse(pop2 == "I" & year < 2012 & org ==
+                         "A.baumannii", italyuci, NA))
+# Final plot
+comppops <- comppops %>% filter(pop2 != "Emilia-Romagna")
+comppops <- comppops%>% rename(Population = "pop1")
+comppops$Population <- as_factor(comppops$Population)
+comppops$Population <- fct_recode(comppops$Population, Modena="M", "Emilia-Romagna (other)"="ERo", "Emilia-Romagna"="ER", Italy="I")
+comppops$Population <- fct_recode(comppops$Population, Modena="M", "Emilia-Romagna (other)"="ERo", "Emilia-Romagna"="ER", Italy="I")
+comppops$pop2 <- fct_recode(comppops$pop2, Modena="M", "Emilia-Romagna (other)"="ERo", "Emilia-Romagna"="ER", Italy="I")
+
+
+rm(compkp, comppa, compab, ERovsER_BSI, MvER_all, MvI_bsi, MvER_bsi, ERovsI_BSI, ERovsER_all, ERovsER_BSI)
+
+
+
+ggplot(comppops %>% filter(pop2 !="Emilia-Romagna"), aes(year, totdiff, group=Population, fill=Population,
+                     color=Population))+
+    geom_line()+
+    geom_ribbon(aes(ymin = totlci, ymax = totuci), alpha = 0.2,
+                color=NA)+
+    geom_ribbon(aes(ymin = italylci, ymax = italyuci), alpha = 0.2,
+                linetype = "dotted", fill=NA)+
+    geom_line(aes(x= year, y=italytotdiff), linetype= "dashed")+
+    facet_grid(org~pop2+site1, scales="free_y")+
+  geom_hline(yintercept=0, linetype="dashed", color="darkgrey")+
+  scale_y_continuous ("Difference in resistance, %R",
+                      labels=scales::percent_format(accuracy=1))+
+  scale_x_continuous ("Year", breaks=seq(2008,2018,2))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin=0.3, end=0.8)+
+  scale_fill_viridis_d(option="A", begin = 0.3, end=0.8)+
+  theme(axis.text.x = element_text(angle = 45, hjust =1))+
+  theme(legend.position = "top")+
+  theme(legend.title=element_text(size=9))+
+  coord_cartesian(ylim=c(-0.4,0.4))
+
+```
+
+## 2.6 Difference in infection site resistance trends
+```{r message=FALSE, warning=FALSE, results='hide', cache= TRUE}
+## Obtain differences using the smooth_diff function
+mod_site_kp <- smooth_diff(kp_pop_GAMx, pdat, "BSI.M", "All clinical.M", "sitepop")
+
+mod_site_pa <- smooth_diff(pa_pop_GAMx, pdat, "BSI.M", "All clinical.M", "sitepop")
+
+mod_site_ab <- smooth_diff(ab_pop_GAMx, pdat, "BSI.M", "All clinical.M", "sitepop")
+
+ero_site_kp <- smooth_diff(kp_pop_GAMx, pdat, "BSI.ERo", "All clinical.ERo", "sitepop")
+
+ero_site_pa <- smooth_diff(pa_pop_GAMx, pdat, "BSI.ERo", "All clinical.ERo", "sitepop")  
+
+ero_site_ab <- smooth_diff(ab_pop_GAMx, pdat, "BSI.ERo", "All clinical.ERo", "sitepop")
+
+
+site_kp <- rbind(mod_site_kp, ero_site_kp) %>% mutate(org = "K.pneumoniae") 
+site_pa <- rbind(mod_site_pa, ero_site_pa) %>% mutate(org = "P.aeruginosa")
+site_ab <- rbind(mod_site_ab, ero_site_ab) %>% mutate(org = 
+"A.baumannii")
+
+sitediffs <- cbind(date = seq(2008, 2018, length = 264), 
+             rbind(site_kp, site_pa, site_ab)) %>% 
+  separate(col=pair, into=c("site1","pop1", "pop2"),
+           sep = "[.]", remove = TRUE) %>% 
+  separate(col="pop1", into=c("pop1", "null"), 
+           sep = "[-]", remove = TRUE) %>% dplyr::select(-"null") %>% rename(Population = "pop1")
+sitediffs$Population <- as_factor(sitediffs$Population)
+
+sitediffs$Population <- fct_recode (sitediffs$Population, Modena = "M", "Emilia-Romagna (other)" = "ERo")
+
+
+rm(site_kp, site_pa, site_ab)
+
+#### plots
+ggplot(sitediffs, aes(date, diff, group=Population, fill=Population,
+                     color=Population))+
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2,
+                color=NA)+
+    geom_line()+
+    facet_grid(org~Population, scales="free_y")+
+  geom_hline(yintercept=0, linetype="dashed", color="darkgrey")+
+  scale_y_continuous ("Relative difference (logit %R)")+
+  scale_x_continuous ("Year", breaks=seq(2008,2018,2))+
+  theme_pnaat()+
+  scale_color_viridis_d(option="A", begin=0.8, end=0.2)+
+  scale_fill_viridis_d(option="A", begin = 0.8, end=0.2)+
+  theme(axis.text.x = element_text(angle = 45, hjust =1))+
+  theme(legend.position = "none")+
+  coord_cartesian (ylim=c(-2,2))
+
+```
