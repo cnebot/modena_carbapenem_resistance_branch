@@ -75,14 +75,14 @@ source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth 
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data 
-main <- read_csv ("modena_carbapenem.csv", show_col_types =FALSE)
+main <- read_csv ("./Data/raw data/modena_final.csv", show_col_types =FALSE)
 date <- tibble(date = as.Date("2008-01-01")+0:131)
-main <- cbind(date,main) %>% dplyr::select(!c(months, study_m))
+main <- cbind(date,main) %>% dplyr::select(!c(Month, study_m))
 
 # Create wide as a time-series indexed table (tsibble)
 tswide <- main %>% mutate(
   across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
-  across(abhr: fluoroquinolones, ~./obd*1000))  %>% 
+  across(abhr: rectalswab, ~./obd*1000))  %>% 
   as_tsibble(index = date)
 
 ```
@@ -91,8 +91,7 @@ tswide <- main %>% mutate(
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # outlier detection and replacement with cleaned values
-wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obd, bedocc,
-abhr:fluoroquinolones)
+wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obd, bedocc,abhr:all_monitored)
 
 newabx.matrix<-rep(0,132)
 for(i in 1:length(wide_clean[1,])){
@@ -103,9 +102,12 @@ newabx.matrix <-cbind(newabx.matrix, newabx)
 newabx.matrix<-newabx.matrix[,-1]
 
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
-tmp <-main %>% dplyr::select(!c(date, obd,bedocc,
-abhr:fluoroquinolones))
-tswide_clean <- cbind(tmp, newabx.matrix) %>% as_tsibble(index=date)
+newabx.matrix<- newabx.matrix[,!colnames(newabx.matrix) %in% 'date']
+
+tmp <-tswide %>% dplyr::select(!c(date, obd,bedocc,
+abhr:all_monitored))
+
+tswide_clean <- cbind(newabx.matrix,tmp) %>% as_tsibble(index=date)
 rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
 ```
@@ -113,6 +115,8 @@ rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
 ## 1.5 Trend decomposition
 ```{r message=FALSE, warning=FALSE, results='hide'}
+
+
 # create long format data for incidence
 
 tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
@@ -120,18 +124,20 @@ tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
   cols = csab_all_any:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
   names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") 
-tslong_incid <- tslong %>% mutate(incidence = value/obd*10000)
-tslong_incid <- tslong_incid %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
 
-tslong_bugs <- tslong_incid %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
 
-tslongbugs2<- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
+tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
+
+tslong_bugs <- tslong %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+
+tslongbugs <- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
 
 decompose <- function(data, y, ...){
     y <- enquo(y)
     dvar <- data %>% pull(!!y) %>% as.ts()
     tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
-                                 season(window =13), robust = TRUE)) %>%
+                                 season(window =13), 
+                               robust = TRUE)) %>%
       components()
     data <-cbind(data,tmpd[,3:6])
 }
@@ -151,7 +157,7 @@ ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 ```{r  message=FALSE, warning=FALSE,  results='hide', cache= TRUE}
 
 # Prepare data
-otherpops <- read_csv("populations_year.csv", col_types = cols(
+otherpops <- read_csv("./Data/raw data/populations_year.csv", col_types = cols(
   pop = col_factor(),
   org = col_factor(),
   year = col_integer(),
@@ -298,6 +304,9 @@ ggplot(otherpops_num,
   theme(legend.position = "top")+
   theme(legend.title=element_text(size=9))
 
+ggsave("./Output/regnat_num.jpg")
+
+
 # Plot for proportion of regional isolates occurring in Modena by susceptibility, organism, body site
 ggplot(pcregionall, aes(year, est, 
   group= Susceptibility, fill=Susceptibility, color= Susceptibility))+
@@ -315,6 +324,10 @@ ggplot(pcregionall, aes(year, est,
   theme(axis.text.x = element_text(angle = 45, hjust =1))+
   theme(legend.position = "top")+
   theme(legend.title=element_text(size=9))
+
+
+ggsave("./Output/regnat_pcmodena.jpg", 
+       height=15, width=20, units="cm")
 
 
 ```
@@ -473,7 +486,7 @@ ggplot(orgpredsed, aes(year, fit, color=Population, fill=Population))+
       ymax=fit+(1.96*se.fit)), alpha=0.2, color=NA)+
   facet_grid(org~site1, scales="free_y")+
   scale_x_continuous ("Year", breaks=seq(2008,2018,2))+
-  scale_y_continuous(name="% Carbapenem resistant (I/R)",
+  scale_y_continuous(name="% Carbapenem resistant",
              labels=scales::percent_format(accuracy=1),
              limits=c(0,NA))+
   scale_color_viridis_d(option="A", begin=0.8, end=0.2)+
@@ -483,7 +496,8 @@ ggplot(orgpredsed, aes(year, fit, color=Population, fill=Population))+
   theme(axis.text.x = element_text(angle = 45, hjust =1))+
   theme(legend.position = "top")
 
-
+ggsave("./Output/regnat_pcR_site_pop.jpg", 
+       height=15, width=20, units="cm")
 
 ```
 
@@ -639,6 +653,10 @@ ggplot(comppops %>% filter(pop2 !="Emilia-Romagna"), aes(year, totdiff, group=Po
   theme(legend.title=element_text(size=9))+
   coord_cartesian(ylim=c(-0.4,0.4))
 
+ggsave("./Output/regnat_diffs.jpg", 
+       height=15, width=20, units="cm")
+
+
 ```
 
 ## 2.6 Difference in infection site resistance trends
@@ -691,5 +709,8 @@ ggplot(sitediffs, aes(date, diff, group=Population, fill=Population,
   theme(axis.text.x = element_text(angle = 45, hjust =1))+
   theme(legend.position = "none")+
   coord_cartesian (ylim=c(-2,2))
+
+ggsave("./Output/regnat_diffs_site.jpg", 
+       height=15, width=20, units="cm")
 
 ```
