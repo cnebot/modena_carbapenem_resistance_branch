@@ -36,7 +36,7 @@ renv::activate()
 
 ```
 
-## 1.2 Load required packages and customised plot theme
+## 1.3 Load required packages and customised plot theme
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 library(tidyverse) # to enable tidyverse functions
@@ -64,18 +64,20 @@ library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 library(mgcViz) # for plots and model checks of GAM
+
 source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
+
 source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing
 
 source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth differences from an Xp matrix 
 
 ```
 
-## 1.3 Load data and process
+## 1.4 Load data and process
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data 
-main <- read_csv ("./Data/raw data/modena_final.csv", show_col_types =FALSE)
+main <- read_csv ("../Data/raw data/modena_final.csv", show_col_types =FALSE)
 date <- tibble(date = as.Date("2008-01-01")+0:131)
 main <- cbind(date,main) %>% dplyr::select(!c(Month, study_m))
 
@@ -87,7 +89,7 @@ tswide <- main %>% mutate(
 
 ```
 
-## 1.4 Outlier detection and time-series cleaning
+## 1.5 Outlier detection and time-series cleaning
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # outlier detection and replacement with cleaned values
@@ -99,6 +101,7 @@ abx<- wide_clean[,i]
 newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
 newabx.matrix <-cbind(newabx.matrix, newabx)
 }
+
 newabx.matrix<-newabx.matrix[,-1]
 
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
@@ -113,7 +116,7 @@ rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 ```
 
 
-## 1.5 Trend decomposition
+## 1.6 Trend decomposition
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 
@@ -123,12 +126,14 @@ tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
   pivot_longer(
   cols = csab_all_any:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)") %>% filter(pop!="NA") 
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
+  values_to="incidence") %>% filter(pop!="NA") 
 
 
-tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site)) %>% dplyr::select(-"value")
+tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
-tslong_bugs <- tslong %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+tslong_bugs <- tslong %>% dplyr::select(!c(bedocc:int_asp)) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+
 
 tslongbugs <- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
 
@@ -142,9 +147,10 @@ decompose <- function(data, y, ...){
     data <-cbind(data,tmpd[,3:6])
 }
 
-ts_decomp <- tslongbugs2 %>% 
+ts_decomp <- tslongbugs %>% 
     mutate(decs = map(data, decompose, y = incidence)) %>%
     dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+
 ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 
 
@@ -157,7 +163,7 @@ ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 ```{r  message=FALSE, warning=FALSE,  results='hide', cache= TRUE}
 
 # Prepare data
-otherpops <- read_csv("./Data/raw data/populations_year.csv", col_types = cols(
+otherpops <- read_csv("../Data/raw data/populations_year.csv", col_types = cols(
   pop = col_factor(),
   org = col_factor(),
   year = col_integer(),
