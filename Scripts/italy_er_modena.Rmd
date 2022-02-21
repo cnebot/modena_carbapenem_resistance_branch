@@ -1,14 +1,14 @@
 ---
 title: "Modena Time Series Analysis"
 output:
-  html_document:
-    df_print: paged
-    toc: yes
-  word_document:
-    toc: yes
   html_notebook:
     toc: yes
     toc_float: yes
+  word_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
   pdf_document:
     toc: yes
 ---
@@ -77,14 +77,15 @@ source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth 
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # Read in the main data 
-main <- read_csv ("../Data/raw data/modena_final.csv", show_col_types =FALSE)
-date <- tibble(date = as.Date("2008-01-01")+0:131)
-main <- cbind(date,main) %>% dplyr::select(!c(Month, study_m))
+main <- read_xlsx("../Data/raw data/modena_final_2008_2018.xlsx")
 
+date <- yearmonth(seq(as.Date("2008-01-01"), as.Date("2018-12-31"), by = "1 month")) %>% as_tibble() %>% rename(date="value")
+
+main <- cbind(date,main) %>% dplyr::select(!c(study_m, Month))
 # Create wide as a time-series indexed table (tsibble)
 tswide <- main %>% mutate(
-  across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
-  across(abhr: rectalswab, ~./obd*1000))  %>% 
+  across(gmneg_all_clinical:crpa_cohca_swab,~./obds*10000),
+  across(abhr: rectalswab, ~./obds*1000))  %>% 
   as_tsibble(index = date)
 
 ```
@@ -93,7 +94,7 @@ tswide <- main %>% mutate(
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 # outlier detection and replacement with cleaned values
-wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obd, bedocc,abhr:all_monitored)
+wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obds, bedocc,abhr:all_monitor_abx)
 
 newabx.matrix<-rep(0,132)
 for(i in 1:length(wide_clean[1,])){
@@ -107,10 +108,10 @@ newabx.matrix<-newabx.matrix[,-1]
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
 newabx.matrix<- newabx.matrix[,!colnames(newabx.matrix) %in% 'date']
 
-tmp <-tswide %>% dplyr::select(!c(date, obd,bedocc,
-abhr:all_monitored))
+tmp <-tswide %>% dplyr::select(!c(date, obds,bedocc,
+abhr:all_monitor_abx))
 
-tswide_clean <- cbind(newabx.matrix,tmp) %>% as_tsibble(index=date)
+tswide_clean <- dplyr::bind_cols(newabx.matrix,tmp) %>% as_tsibble(index=date)
 rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
 ```
@@ -121,7 +122,6 @@ rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
 
 # create long format data for incidence
-
 tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
   pivot_longer(
   cols = csab_all_any:crpa_cohca_swab,
@@ -144,7 +144,7 @@ decompose <- function(data, y, ...){
                                  season(window =13), 
                                robust = TRUE)) %>%
       components()
-    data <-cbind(data,tmpd[,3:6])
+    data <-dplyr::bind_cols(data,tmpd[,3:6])
 }
 
 ts_decomp <- tslongbugs %>% 
