@@ -143,6 +143,17 @@ tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
 tslong <- tslong %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
 
+
+tswide_clean %>%
+  model(
+    STL(gmneg_all_clinical ~ trend(window = 21) +
+                   season(window = 5),
+    robust = TRUE)) %>%
+  components() %>%
+  autoplot()
+
+
+
 tslongbugs<- tslong %>% filter(pop=="hca" | pop=="conothca")
 
 decompose <- function(data, y, ...){
@@ -156,12 +167,19 @@ decompose <- function(data, y, ...){
 
 ts_decomp <- tslongbugs %>% 
     mutate(decs = map(data, decompose, y = incidence)) %>%
-    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+    dplyr::select(-data)
+
+ts_decomp$decs <-map(ts_decomp$decs, ~.x[[1]]$x)
+beer_fc$Beer <- map(beer_fc$Beer, ~ .x[[1]]$x)
+beer_fc %>%
+       unnest(c(Beer))
+
 ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
+
 
 ```
 
-# 3. ARIMAs
+# 3. Univariate ARIMAs
 
 In addition to time-series decomposition applied to all variables (to facilitate descriptive statistics) we further characterised key time-series, including:
 
@@ -169,30 +187,27 @@ In addition to time-series decomposition applied to all variables (to facilitate
 -   Antibiotic time-series - for counterfactuals
 -   Other infection time-series driving antibiotic use
 
-## 3.1 Primary outcomes
 
-The primary study outcomes of interest are:
-
--   crpa hca clinical,
--   crpa conothca clinical,
--   crkp hca clinical,
--   crkp conothca clinical,
--   crab hca clinical,
--   crab conothca clinical
-
-### 3.1.1 Redefine timeseries datasets for ARIMAs
+## 3.1 Preparation 
+### 3.1.1. Redefine timeseries datasets for ARIMAs
+We create three data sets representing periods before interventions 1 to 3 allowing characterisation oftemporal behaviour in time series before influence of each intervention.
 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
 
 # Derive pre-intervention time-series
-ts_p1_pre_ihh_itargscr <- tswide_clean %>% filter (phase <=1)
+ts_p1 <- tswide_clean %>% filter (phase <=1)
 
-ts_p2_pre_icarba <- tswide_clean %>% filter (phase <=2)
+ts_p2<- tswide_clean %>% filter (phase <=2)
 date_icarba<-ts_p2_pre_icarba$date
 
-ts_p3_pre_iabs_iunivscr <- tswide_clean %>% filter (phase <=3)
+ts_p3 <- tswide_clean %>% filter (phase <=3)
 
-##### auto arima function for reference
+```
+
+
+### 3.1.2 Auto arima function
+This function creates output from automated ARIMA from the 'forecast' package 
+```{r message=FALSE, warning=FALSE, include=FALSE}
 
 auto.arima.df <- function(data, y, ...){
     y <- enquo(y)
@@ -204,158 +219,376 @@ auto.arima.df <- function(data, y, ...){
 
 ```
 
-### 3.1.2 HCA-CRKp clinical infections (*crkp hca clinical*)
+## 3.2 Primary outcomes
+The primary study outcomes of interest are for each CRO
+3.2.1   CRKp hca clinical,
+3.2.2   CRAb hca clinical,
+3.2.3   CRPa hca clinical
+3.2.4   CRKp conothca clinical,
+3.2.5   CRAb conothca bsi
+3.2.6   CRPa hca clinical,
 
-```{r message=FALSE, warning=FALSE, include=FALSE}
+
+### 3.2.1 HCA-CRKp clinical infections (*crkp_hca_clinical*)
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
 
 #### Plot data, ACF, PACF
 
 tswide_clean <- tswide_clean %>% as_tsibble(index=date)
 
-tswide_clean %>% gg_tsdisplay(crkp_ho_clinical, "partial")
+tswide_clean %>% gg_tsdisplay(crkp_hca_clinical, "partial")
 
 
 #### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
-tswide_clean %>% features(crkp_ho_clinical, unitroot_kpss)
-tswide_clean %>% features(crkp_ho_clinical, unitroot_ndiffs) 
-tswide_clean %>% features(crkp_ho_clinical, unitroot_nsdiffs,.period=12) 
+tswide_clean %>% features(crkp_hca_clinical, unitroot_kpss)
+tswide_clean %>% features(crkp_hca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_hca_clinical, unitroot_nsdiffs,.period=12) 
 
 #### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-lambda<-guerrero(tswide_clean$crkp_ho_clinical, .period=12L)
+lambda<-guerrero(tswide_clean$crkp_hca_clinical, .period=12L)
 
 #### create new transformed variable
-tswide_clean$crkp_ho_clinical_bc <- (((tswide_clean$crkp_ho_clinical)^lambda)-1)/lambda
+tswide_clean$crkp_hca_clinical_bc <- (((tswide_clean$crkp_hca_clinical)^lambda)-1)/lambda
 
 ####  Plot the transformed variable, ACF, PACF
-tswide_clean %>% gg_tsdisplay(crkp_ho_clinical_bc, "partial")
+tswide_clean %>% gg_tsdisplay(crkp_hca_clinical_bc, "partial")
 
 #### Repeat unit root tests and differencing number evaluations on the transformed data
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_kpss)
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_ndiffs)
-tswide_clean %>% features(crkp_ho_clinical_bc, unitroot_nsdiffs,.period=12) 
+tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_kpss)
+tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_ndiffs)
+tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_nsdiffs,.period=12) 
 
-tswide_clean %>% gg_tsdisplay(difference(crkp_ho_clinical_bc), "partial")  
+tswide_clean %>% gg_tsdisplay(difference(crkp_hca_clinical_bc), "partial")  
 
-# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED DATA
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
 arima_crkp_ho <- tswide_clean %>% model(
-  arima_crkp_ho_101 = ARIMA(crkp_ho_clinical ~ pdq(1,0,1)),
-  stepwise_crkp_ho = ARIMA(crkp_ho_clinical)) 
+  arima_crkp_hca_101 = ARIMA(crkp_hca_clinical ~ pdq(1,0,1)),
+  stepwise_crkp_ho = ARIMA(crkp_hca_clinical)) 
 
 glance(arima_crkp_ho) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
-arima_crkp_ho  %>% dplyr::select(arima_crkp_ho_101) %>% gg_tsresiduals() # compare models
+arima_crkp_ho  %>% dplyr::select(arima_crkp_hca_101) %>% gg_tsresiduals() # compare models
 arima_crkp_ho %>% dplyr::select(stepwise_crkp_ho) %>% gg_tsresiduals() # compare models
 
 
 #### Fit best manual and auto ARIMA on transformed data
-arima_crkp_ho_bc <- tswide_clean %>% model(
-  arima_crkp_ho_bc_111 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,1,1)),
-  arima_crkp_ho_bc_101_100 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,0,1) + PDQ(1,0,0)),
-    arima_crkp_ho_bc_011_100 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,1,1) + PDQ(1,0,0)),
-  arima_crkp_ho_bc_101 = ARIMA(crkp_ho_clinical_bc ~ pdq(1,0,1)),
-  arima_crkp_ho_bc_001 = ARIMA(crkp_ho_clinical_bc ~ pdq(0,0,1)),
-  stepwise_crkp_ho_bc = ARIMA(crkp_ho_clinical_bc)) 
+arima_crkp_hca_bc <- tswide_clean %>% model(
+  arima_crkp_hca_bc_111 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,1,1)),
+  arima_crkp_hca_bc_101_100 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,0,1) + PDQ(1,0,1)),
+    arima_crkp_hca_bc_011_100 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,1,1) + PDQ(1,0,0)),
+  arima_crkp_hca_bc_101 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,0,1)),
+  arima_crkp_hca_bc_001 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,0,1)),
+  stepwise_crkp_hca_bc = ARIMA(crkp_hca_clinical_bc)) 
 
-glance(arima_crkp_ho_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+glance(arima_crkp_hca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
-arima_crkp_ho_bc  %>% dplyr::select(arima_crkp_ho_bc_011_100) %>% gg_tsresiduals() # compare models
-arima_crkp_ho_bc %>% dplyr::select(stepwise_crkp_ho_bc) %>% gg_tsresiduals() # compare models
+arima_crkp_hca_bc  %>% dplyr::select(arima_crkp_hca_bc_011_100) %>% gg_tsresiduals() # compare models
+arima_crkp_hca_bc %>% dplyr::select(stepwise_crkp_hca_bc) %>% gg_tsresiduals() # compare models
 
 #### Check portmanteau tests of best fit option
-augment(arima_crkp_ho_bc) %>% 
-  filter(.model=='arima_crkp_ho_bc_011_100') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
+augment(arima_crkp_hca_bc) %>% 
+  filter(.model=='arima_crkp_hca_bc_011_100') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
 
 
 
 ```
 
-### 3.1.3 HCA-CRAb clinical infections (*crab hca clinical*)
+### 3.2.2 HCA-CRAb clinical infections (*crab_hca_clinical*)
 
-```{r message=FALSE, warning=FALSE, include=FALSE}
+```{r message=FALSE, warning=FALSE, include=TRUE}
 
 #### Plot data, ACF, PACF
-tswide_clean %>% gg_tsdisplay(crab_ho_clinical, "partial") 
+tswide_clean %>% gg_tsdisplay(crab_hca_clinical, "partial") 
 
 #### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
-tswide_clean %>% features(crab_ho_clinical, unitroot_kpss)
-tswide_clean %>% features(crab_ho_clinical, unitroot_ndiffs)
-tswide_clean %>% features(crab_ho_clinical, unitroot_nsdiffs,.period=12)
-tswide_clean %>% gg_tsdisplay(difference(crab_ho_clinical), "partial") 
+tswide_clean %>% features(crab_hca_clinical, unitroot_kpss)
+tswide_clean %>% features(crab_hca_clinical, unitroot_ndiffs)
+tswide_clean %>% features(crab_hca_clinical, unitroot_nsdiffs,.period=12)
+tswide_clean %>% gg_tsdisplay(difference(crab_hca_clinical), "partial") 
 
 
 #### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-lambda<-guerrero(tswide_clean$crab_ho_clinical, .period=12L)
+lambda<-guerrero(tswide_clean$crab_hca_clinical, .period=12L)
 
 #### Fit best manual and auto ARIMA on transformed data
 arima_crab_ho <- tswide_clean %>% model(
-  arima_crab_ho_111 = ARIMA(crab_ho_clinical ~ pdq(1,1,1)),
-  arima_crab_ho_011 = ARIMA(crab_ho_clinical ~ pdq(0,1,1)),
-  arima_crab_ho_110 = ARIMA(crab_ho_clinical ~ pdq(1,1,0)),
-  arima_crab_ho_101 = ARIMA(crab_ho_clinical ~ pdq(1,0,1)),
-  stepwise_crab_ho = ARIMA(crab_ho_clinical))
+  arima_crab_hca_111 = ARIMA(crab_hca_clinical ~ pdq(1,1,1)),
+  arima_crab_hca_011 = ARIMA(crab_hca_clinical ~ pdq(0,1,1)),
+  arima_crab_hca_110 = ARIMA(crab_hca_clinical ~ pdq(1,1,0)),
+  arima_crab_hca_101 = ARIMA(crab_hca_clinical ~ pdq(1,0,1)),
+  stepwise_crab_ho = ARIMA(crab_hca_clinical))
 
 glance(arima_crab_ho) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
 # check the residuals of best models to ensure white noise.
-arima_crab_ho  %>% dplyr::select(arima_crab_ho_011) %>% gg_tsresiduals() 
-arima_crab_ho %>% dplyr::select(arima_crab_ho_101) %>% gg_tsresiduals()
+arima_crab_ho  %>% dplyr::select(arima_crab_hca_011) %>% gg_tsresiduals() 
+arima_crab_ho %>% dplyr::select(arima_crab_hca_101) %>% gg_tsresiduals()
 
 #### Check portmanteau tests of best fit option
 augment(arima_crab_ho) %>% 
-  filter(.model=='arima_crab_ho_011') %>%
+  filter(.model=='arima_crab_hca_011') %>%
   features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
 
 
 ```
 
-### 3.1.4 HCA-CRPa clinical infections (*crpa hca clinical*)
+### 3.2.3 HCA-CRPa clinical infections (*crpa hca clinical*)
 
-```{r message=FALSE, warning=FALSE, include=FALSE}
+```{r message=FALSE, warning=FALSE, include=TRUE}
 
 #### Plot data, ACF, PACF
-tswide_clean %>% gg_tsdisplay(crpa_ho_clinical, "partial")
+tswide_clean %>% gg_tsdisplay(crpa_hca_clinical, "partial")
 
 #### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
-tswide_clean %>% features(crpa_ho_clinical, unitroot_kpss)
-tswide_clean %>% features(crpa_ho_clinical, unitroot_ndiffs) 
-tswide_clean %>% features(crpa_ho_clinical, unitroot_nsdiffs,.period=12) 
+tswide_clean %>% features(crpa_hca_clinical, unitroot_kpss)
+tswide_clean %>% features(crpa_hca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crpa_hca_clinical, unitroot_nsdiffs,.period=12) 
 
-tswide_clean %>% gg_tsdisplay(difference(crpa_ho_clinical), "partial") 
-crpa_ho_clin_diff1 <-  tsibble::difference(tswide_clean$crpa_ho_clinical, lag =1, differences = 1)
-tswide_clean %>% gg_tsdisplay(crpa_ho_clin_diff1, "partial")
+tswide_clean %>% gg_tsdisplay(difference(crpa_hca_clinical), "partial") 
+crpa_hca_clin_diff1 <-  tsibble::difference(tswide_clean$crpa_hca_clinical, lag =1, differences = 1)
+tswide_clean %>% gg_tsdisplay(crpa_hca_clin_diff1, "partial")
 
 #### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-tswide_clean <- tswide_clean %>% dplyr::mutate(crpa_ho_clin_diff1 = replace_na(crpa_ho_clin_diff1, 0))
-tswide_clean <- tswide_clean %>% dplyr::mutate(new_crpa_ho_clin_diff1 = crpa_ho_clin_diff1+10)
-boxcoxnc(tswide_clean$new_crpa_ho_clin_diff1, method = "sw", lambda2 = 10)
+tswide_clean <- tswide_clean %>% dplyr::mutate(crpa_hca_clin_diff1 = replace_na(crpa_hca_clin_diff1, 0))
+tswide_clean <- tswide_clean %>% dplyr::mutate(new_crpa_hca_clin_diff1 = crpa_hca_clin_diff1+10)
+boxcoxnc(tswide_clean$new_crpa_hca_clin_diff1, method = "sw", lambda2 = 10)
 
 
 #### Repeat unit root tests and differencing number evaluations on the transformed data
-tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_kpss)
-tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_ndiffs)
-tswide_clean %>% features(crpa_ho_clin_diff1, unitroot_nsdiffs, .period=12)
+tswide_clean %>% features(crpa_hca_clin_diff1, unitroot_kpss)
+tswide_clean %>% features(crpa_hca_clin_diff1, unitroot_ndiffs)
+tswide_clean %>% features(crpa_hca_clin_diff1, unitroot_nsdiffs, .period=12)
 
 #### Fit best manual and auto ARIMA
-arima_crpa_ho <- tswide_clean %>% model(
-  arima_crpa_ho_111 = ARIMA(crpa_ho_clinical ~ pdq(1,1,1)),
-  arima_crpa_ho_011 = ARIMA(crpa_ho_clinical ~ pdq(0,1,1)),
-  arima_crpa_ho_101 = ARIMA(crpa_ho_clinical ~ pdq(1,0,1)),
-  stepwise_crpa_ho = ARIMA(crpa_ho_clinical)) 
+arima_crpa_hca <- tswide_clean %>% model(
+  arima_crpa_hca_111 = ARIMA(crpa_hca_clinical ~ pdq(1,1,1)),
+  arima_crpa_hca_011 = ARIMA(crpa_hca_clinical ~ pdq(0,1,1)),
+  arima_crpa_hca_101 = ARIMA(crpa_hca_clinical ~ pdq(1,0,1)),
+  stepwise_crpa_hca = ARIMA(crpa_hca_clinical)) 
 
-glance(arima_crpa_ho) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+glance(arima_crpa_hca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
 #### Examine residuals of ARIMA to check correct identification
-arima_crpa_ho  %>% dplyr::select(arima_crpa_ho_011) %>% gg_tsresiduals()
-arima_crpa_ho %>% dplyr::select(arima_crpa_ho_101) %>% gg_tsresiduals()
-arima_crpa_ho %>% dplyr::select(stepwise_crpa_ho) %>% gg_tsresiduals() 
+arima_crpa_hca  %>% dplyr::select(arima_crpa_hca_011) %>% gg_tsresiduals()
+arima_crpa_hca %>% dplyr::select(stepwise_crpa_hca) %>% gg_tsresiduals() 
 
 #### Check portmanteau tests of best fit option
-augment(arima_crpa_ho) %>% 
-  filter(.model=='arima_crpa_ho_101') %>%
+augment(arima_crpa_hca) %>% 
+  filter(.model=='arima_crpa_hca_011') %>%
   features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
 ```
 
-## 3.2 Antibiotic and IPC time series
+### 3.2.4 non-HCA-CRKp clinical (*crkp_conothca_clinical*)
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+#### Plot data, ACF, PACF
+
+tswide_clean <- tswide_clean %>% as_tsibble(index=date)
+
+tswide_clean %>% gg_tsdisplay(crkp_conothca_clinical, "partial")
+
+
+#### Is the series stationary? Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crkp_conothca_clinical, unitroot_kpss)
+tswide_clean %>% features(crkp_conothca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_conothca_clinical, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crkp_conothca_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crkp_conothca_clinical_bc <- (((tswide_clean$crkp_conothca_clinical)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crkp_conothca_clinical_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+tswide_clean %>% features(crkp_conothca_clinical_bc, unitroot_kpss) # marginal
+tswide_clean %>% features(crkp_conothca_clinical_bc, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_conothca_clinical_bc, unitroot_nsdiffs,.period=12) 
+
+tswide_clean %>% gg_tsdisplay(difference(crkp_conothca_clinical_bc), "partial")  
+
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
+arima_crkp_conothca <- tswide_clean %>% model(
+  arima_crkp_conothca_101 = ARIMA(
+    crkp_conothca_clinical ~ pdq(1,0,1)),
+  stepwise_crkp_conothca = ARIMA(
+    crkp_conothca_clinical)) 
+
+glance(arima_crkp_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crkp_conothca  %>% dplyr::select(arima_crkp_conothca_101) %>% gg_tsresiduals() # compare models
+arima_crkp_conothca %>% dplyr::select(stepwise_crkp_conothca) %>% gg_tsresiduals() # compare models
+
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crkp_conothca_bc <- tswide_clean %>% model(
+  arima_crkp_conothca_bc_111 = ARIMA(
+    crkp_conothca_clinical_bc ~ pdq(1,1,1)),
+  arima_crkp_conothca_bc_011 = ARIMA(
+    crkp_conothca_clinical_bc ~ pdq(0,1,1)),
+  arima_crkp_conothca_bc_101 = ARIMA(
+    crkp_conothca_clinical_bc ~ pdq(1,0,1)),
+  stepwise_crkp_conothca_bc = ARIMA(
+    crkp_conothca_clinical_bc)) 
+
+glance(arima_crkp_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+
+arima_crkp_conothca_bc  %>% dplyr::select(arima_crkp_conothca_bc_111) %>% gg_tsresiduals() # compare models
+arima_crkp_conothca_bc %>% dplyr::select(stepwise_crkp_conothca_bc) %>% gg_tsresiduals() # compare models
+
+#### Check portmanteau tests of best fit option
+augment(arima_crkp_conothca_bc) %>% 
+  filter(.model=='arima_crkp_conothca_bc_011') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
+
+
+
+```
+
+
+
+
+### 3.2.5 non-HCA-CRAb clinical (*crab_conothca_clinical*)
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+#### Plot data, ACF, PACF
+
+tswide_clean <- tswide_clean %>% as_tsibble(index=date)
+
+tswide_clean %>% gg_tsdisplay(crab_conothca_clinical, "partial")
+
+
+#### Is the series stationary? Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crab_conothca_clinical, unitroot_kpss)
+tswide_clean %>% features(crab_conothca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crab_conothca_clinical, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crab_conothca_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crab_conothca_clinical_bc <- (((tswide_clean$crab_conothca_clinical)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crab_conothca_clinical_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+tswide_clean %>% features(crab_conothca_clinical_bc, unitroot_kpss) # marginal
+tswide_clean %>% features(crab_conothca_clinical_bc, unitroot_ndiffs) 
+tswide_clean %>% features(crab_conothca_clinical_bc, unitroot_nsdiffs,.period=12) 
+
+tswide_clean %>% gg_tsdisplay(difference(crab_conothca_clinical_bc), "partial")  
+
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
+arima_crab_conothca <- tswide_clean %>% model(
+  arima_crab_conothca_101 = ARIMA(
+    crab_conothca_clinical ~ pdq(1,0,1)),
+  stepwise_crab_conothca = ARIMA(
+    crab_conothca_clinical)) 
+
+glance(arima_crab_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crab_conothca  %>% dplyr::select(arima_crab_conothca_101) %>% gg_tsresiduals() # compare models
+arima_crab_conothca %>% dplyr::select(stepwise_crab_conothca) %>% gg_tsresiduals() # compare models
+
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crab_conothca_bc <- tswide_clean %>% model(
+  arima_crab_conothca_bc_111 = ARIMA(
+    crab_conothca_clinical_bc ~ pdq(1,1,1)),
+  arima_crab_conothca_bc_011 = ARIMA(
+    crab_conothca_clinical_bc ~ pdq(0,1,1)),
+  arima_crab_conothca_bc_001 = ARIMA(
+    crab_conothca_clinical_bc ~ pdq(0,0,1)),
+  stepwise_crab_conothca_bc = ARIMA(
+    crab_conothca_clinical_bc)) 
+
+glance(arima_crab_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+
+arima_crab_conothca_bc  %>% dplyr::select(arima_crab_conothca_bc_011) %>% gg_tsresiduals() # compare models
+arima_crab_conothca_bc %>% dplyr::select(stepwise_crab_conothca_bc) %>% gg_tsresiduals() # compare models
+
+#### Check portmanteau tests of best fit option
+augment(arima_crab_conothca_bc) %>% 
+  filter(.model=='arima_crab_conothca_bc_011') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
+
+
+
+```
+
+
+### 3.2.6 non-HCA-CRPa clinical (*crpa_conothca_clinical*)
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+#### Plot data, ACF, PACF
+
+tswide_clean <- tswide_clean %>% as_tsibble(index=date)
+
+tswide_clean %>% gg_tsdisplay(crpa_conothca_clinical, "partial")
+
+
+#### Is the series stationary? Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crpa_conothca_clinical, unitroot_kpss)
+tswide_clean %>% features(crpa_conothca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crpa_conothca_clinical, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crpa_conothca_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crpa_conothca_clinical_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+tswide_clean %>% features(crpa_conothca_clinical_bc, unitroot_kpss) # marginal
+tswide_clean %>% features(crpa_conothca_clinical_bc, unitroot_ndiffs) 
+tswide_clean %>% features(crpa_conothca_clinical_bc, unitroot_nsdiffs,.period=12) 
+
+tswide_clean %>% gg_tsdisplay(difference(crpa_conothca_clinical_bc), "partial")  
+
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
+arima_crpa_conothca <- tswide_clean %>% model(
+  arima_crpa_conothca_101 = ARIMA(
+    crpa_conothca_clinical ~ pdq(1,0,1)),
+  stepwise_crpa_conothca = ARIMA(
+    crpa_conothca_clinical)) 
+
+glance(arima_crpa_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crpa_conothca  %>% dplyr::select(arima_crpa_conothca_101) %>% gg_tsresiduals() # compare models
+arima_crpa_conothca %>% dplyr::select(stepwise_crpa_conothca) %>% gg_tsresiduals() # compare models
+
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crpa_conothca_bc <- tswide_clean %>% model(
+  arima_crpa_conothca_bc_011 = ARIMA(
+    crpa_conothca_clinical_bc ~ pdq(0,1,1)),
+  arima_crpa_conothca_bc_101 = ARIMA(
+    crpa_conothca_clinical_bc ~ pdq(1,0,1)),
+  arima_crpa_conothca_bc_001 = ARIMA(
+    crpa_conothca_clinical_bc ~ pdq(0,0,1)),
+  stepwise_crpa_conothca_bc = ARIMA(
+    crpa_conothca_clinical_bc)) 
+
+glance(arima_crpa_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+
+arima_crpa_conothca_bc  %>% dplyr::select(arima_crpa_conothca_bc_011) %>% gg_tsresiduals() # compare models
+arima_crpa_conothca_bc %>% dplyr::select(stepwise_crpa_conothca_bc) %>% gg_tsresiduals() # compare models
+
+#### Check portmanteau tests of best fit option
+augment(arima_crpa_conothca_bc) %>% 
+  filter(.model=='arima_crpa_conothca_bc_011') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
+
+
+
+```
+
+
+## 3.3 Antibiotic and IPC time series
 
 ```{r}
 
@@ -369,7 +602,8 @@ pre_iabs <- ts_p3_pre_iabs_iunivscr %>% as_tsibble(index="date")
 
 ## 3.3 Influential infection time-series
 
-These time-series are expected to be related to antibiotic use in the population. Bidirectional relationships may exist but we hypothesised that hospital-wide use of important antibiotic exposures driving carbapenem resistance may be responsive to the following:
+These time-series are expected to be related to antibiotic use in the population. Bidirectional relationships may exist but we hypothesised that hospital-wide use of important antibiotic exposures driving epidemiology of CROs may respond as follows:
+- 3GC
 
 -   All gram-negative bloodstream isolates (BSIs) (*gmneg_all_bsi*)
 -   Carbapenem and cephalosporin sensitive E.coli BSI (*ecoliccs_all_bsi*)
@@ -377,9 +611,59 @@ These time-series are expected to be related to antibiotic use in the population
 
 ### 3.3.1 Gram-Neg BSIs
 
-```{r}
-### Carbapenems######################
 
+# 4. ARIMAX cross-correlations
+In this section we look at temporal correlations between variables hypothesised to be related. In particular:
+
+* 4.1   Gram-negative clinical infections and fluoroquinolonoes (fq),
+3rd generation cephalosporins (3gc), anti-pseudomonal 3rd gen cephalosporins (pseudo-3gc)
+* 4.2   ESBL E.coli infections and carbapenems
+* 4.4  Importation pressure and infections or colonisations (each CRO)
+* 4.5  Population interactions (hca vs. non-hca for each CRO)
+* 4.4   
+
+
+## 4.1 Gram-Negative clinical infections and abx use
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crpa_conothca_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
+
+
+# 3rd gen cephalosporins
+boxcox_fn <- function(x){
+  lambda <-guerrero(x, .period=12L)
+  paste0(x,"_bc")
+  
+}
+arimax_gmneg <- ts_p3 
+lambdafq<-guerrero(arimax_gmneg$fq, .period=12L)
+
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
+
+
+CCF(ts_p3, difference(gmneg_all_clinical), 
+    difference(`3gc`), lag_max=24) %>% autoplot(level=95)
+
+
+%>%
+  # Restrict data so models use same fitting period
+  mutate(ed_3gc = c(NA, NA, NA,NA, ts_p3$`3gc`[5:80])) %>%
+  # Estimate models
+  model(
+    lag0 = ARIMA(3gc ~ pdq(d = 0) + TVadverts),
+    lag1 = ARIMA(Quotes ~ pdq(d = 0) +
+                 TVadverts + lag(TVadverts)),
+    lag2 = ARIMA(Quotes ~ pdq(d = 0) +
+                 TVadverts + lag(TVadverts) +
+                 lag(TVadverts, 2)),
+    lag3 = ARIMA(Quotes ~ pdq(d = 0) +
+                 TVadverts + lag(TVadverts) +
+                 lag(TVadverts, 2) + lag(TVadverts, 3))
+  )
 # Prepare differenced time-series
 pre_icarba$gmneg_diff <-  tsibble::difference(pre_icarba$gmneg_all_bsi, lag =1, differences = 1)
 pre_icarba$carbapenem_diff <-  tsibble::difference(pre_icarba$carbapenem, lag =1, differences = 1)
@@ -499,7 +783,9 @@ autoplot(fore.icarba.x3gc)
 
 
 ```
-# 4. Interactions and VARs
+
+
+# 5. Interactions and VARs
 
 First we estimate VAR gram negatve bsi, ecoliccs and ecoli3gcr with each ABX
 
