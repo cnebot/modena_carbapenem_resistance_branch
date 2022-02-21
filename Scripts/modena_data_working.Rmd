@@ -64,7 +64,7 @@ library(sysfonts) # for using google fonts
 library(lubridate) # for working with datetime variables
 library(car) # for Cook's distances
 library(strucchange) # for detecting structural changes in time-series
-library(ganttrify) # for time lines (Gantt type)
+library(ganttrify) # for time lines (Gantt type)  # install.packages("gantifry",destdir = "C://R")
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 library(mgcViz) # for plots and model checks of GAM
@@ -154,10 +154,10 @@ decompose <- function(data, y, ...){
     data <-cbind(data,tmpd[,3:6])
 }
 
-ts_decomp <- tslongbugs %>% 
-    mutate(decs = map(data, decompose, y = incidence)) %>%
-    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
-ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
+# ts_decomp <- tslongbugs %>% 
+#    mutate(decs = map(data, decompose, y = incidence)) %>%
+#    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
+# ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 
 ```
 
@@ -206,7 +206,7 @@ auto.arima.df <- function(data, y, ...){
 
 ### 3.1.2 HCA-CRKp clinical infections (*crkp hca clinical*)
 
-```{r message=FALSE, warning=FALSE, include=FALSE}
+```{r message=FALSE, warning=FALSE, include=T}
 
 #### Plot data, ACF, PACF
 
