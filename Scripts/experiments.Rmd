@@ -161,13 +161,13 @@ decompose <- function(data, y, ...){
     tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
                                  season(window =13), robust = TRUE)) %>%
       components()
-    data <-cbind(data,tmpd[,3:6])
 }
 
 ts_decomp <- tslongbugs %>% 
     mutate(decs = map(data, decompose, y = incidence)) %>%
     dplyr::select(-data)
 
+ts_decomp <- ts_decomp %>% unnest(decs)
 ts_decomp$decs <-map(ts_decomp$decs, ~.x[[1]]$x)
 beer_fc$Beer <- map(beer_fc$Beer, ~ .x[[1]]$x)
 beer_fc %>%
@@ -180,79 +180,185 @@ ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
 
 
 # Experiments
-```{r message=FALSE, warning=FALSE, include=FALSE}
+```{r message=FALSE, warning=FALSE, include=TRUE}
 
 ### Generate new variable
-
+tswide_clean <-tswide_clean %>% mutate(
+  noncarb= fq+`3gc`+pseudo_3gc+other_monitor_abx,
+  threegc =`3gc`)
 
 #### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-lambda<-guerrero(tswide_clean$crpa_conothca_clinical, .period=12L)
+lambda<-guerrero(tswide_clean$noncarb, .period=12L)
+lambda2<-guerrero(tswide_clean$gmneg_all_clinical, .period=12L)
+lambda3<-guerrero(tswide_clean$carbapenem, .period=12L)
+lambda4<-guerrero(tswide_clean$threegc, .period=12L)
 
-#### create new transformed variable
-tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
+#### create new box-cox transformed variables
+tswide_clean$noncarb_bc <- 
+  (((tswide_clean$noncarb)^lambda)-1)/lambda
+tswide_clean$gmneg_all_clinical_bc <-
+  (((tswide_clean$gmneg_all_clinical)^lambda2)-1)/lambda2
+tswide_clean$carbapenem_bc <-
+  (((tswide_clean$carbapenem)^lambda3)-1)/lambda3
+tswide_clean$threegc_bc <- 
+  (((tswide_clean$threegc)^lambda4)-1)/lambda4
+
+# Derive pre-intervention time-series
+ts_p1 <- tswide_clean %>% filter (phase <=1)
+ts_p2<- tswide_clean %>% filter (phase <=2)
+ts_p3 <- tswide_clean %>% filter (phase <=3)
 
 
-# 3rd gen cephalosporins
-boxcox_fn <- function(x){
-  lambda <-guerrero(x, .period=12L)
-  paste0(x,"_bc")
-  
-}
+
+############ Non-carbapenem Abx
+ts_p3 %>% gg_tsdisplay(difference(noncarb), "partial")
+ts_p3 %>% gg_tsdisplay(difference(noncarb_bc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(noncarb,12) %>%
+                         difference(), "partial")
+
+# Fit best manual and two auto ARIMAs
+fit <- ts_p3 %>% model(
+  manual=ARIMA(noncarb~ pdq(3,1,0)+PDQ(0,0,0)),
+  manual2=ARIMA(noncarb~ pdq(1,0,0)+PDQ(0,0,0)),
+  auto = ARIMA(noncarb~pdq(1,1,0)))
+  auto2 = ARIMA(noncarb, stepwise=FALSE))
+
+fit2<- auto.arima(ts_p3$noncarb, d=0, D=0, max.p=4, max.q=0, max.P=0, max.Q=0, start.p=4, ic="aic", allowdrift=TRUE)
+
+# see results
+glance(fit) # compare BIC, AICc etc
+fit %>% select(manual) %>% report() # see manual ARIMA
+fit %>% select(manual) %>% gg_tsresiduals() #see manual ARIMA residuals
+augment(fit) %>%
+  filter(.model=='manual') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+fit %>% select(auto) %>% report() # see first auto ARIMA
+fit %>% select(auto) %>% gg_tsresiduals() # see first auto ARIMA residuals
+augment(fit) %>%
+  filter(.model=='auto') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+fit %>% select(auto2) %>% report() #see second auto ARIMA
+fit %>% select(auto2) %>% gg_tsresiduals() #see second auto ARIMA resid
+augment(fit) %>%
+  filter(.model=='auto2') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+
+ts_p3 %>%
+  autoplot(noncarb) +
+  autolayer(fit %>% select(auto) %>% fabletools::forecast(h = 52),
+    colour = "blue", alpha=0.5, level = 95)+
+  autolayer(fit %>% select(auto)%>% fabletools::forecast(h = 52),
+    colour = "green", alpha=0.5, level = 95)+
+    autolayer(fit %>% select(manual)%>% fabletools::forecast(h = 52),
+    colour = "red", alpha=0.5, level = 95)
+
+
+
+```
+
+
+ts_p3 %>% gg_tsdisplay(difference(carbapenem), "partial")
+ts_p3 %>% gg_tsdisplay(difference(carbapenem_bc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(threegc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(threegc_bc), "partial")
+ts_p3 %>% features(noncarb, unitroot_kpss)
+ts_p3  %>% features(noncarb, unitroot_ndiffs) 
+ts_p3  %>% features(noncarb, unitroot_nsdiffs,.period=12) 
+ts_p3 %>% features(noncarb_bc, unitroot_kpss)
+ts_p3  %>% features(noncarb_bc, unitroot_ndiffs) 
+ts_p3  %>% features(noncarb_bc, unitroot_nsdiffs,.period=12) 
+
+ts_p3 %>% gg_tsdisplay(difference(crpa_hca_clinical), "partial") 
+crpa_hca_clin_diff1 <-  tsibble::difference(tswide_clean$crpa_hca_clinical, lag =1, differences = 1)
+tswide_clean %>% gg_tsdisplay(crpa_hca_clin_diff1, "partial")
+
 arimax_gmneg <- ts_p3 
 lambdafq<-guerrero(arimax_gmneg$fq, .period=12L)
 
 tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
 
 
-CCF(ts_p3, difference(gmneg_all_clinical), 
-    difference(`3gc`), lag_max=24) %>% autoplot(level=95)
+CCF(ts_p3, difference(threegc_bc), difference(gmneg_all_clinical), 
+    lag_max=24) %>% autoplot(level=95)
+
+CCF(ts_p3, difference(ecoli_esbl_all_clinical), 
+    difference(noncarb_bc), lag_max=24) %>% autoplot(level=95)
 
 
-%>%
+fit_determ<-ts_p3 %>%
+  model(deterministic = ARIMA(threegc~1+trend()+ pdq(d = 0)))
+report(fit_determ)
+
+fit_stochastic <-ts_p3 %>%
+  model(stochastic = ARIMA(threegc~ pdq(d = 1)+PDQ(D=1)))
+report(fit_stochastic)
+
+fit_auto<-ts_p3 %>%
+  model(auto=ARIMA(threegc))
+fit_auto %>% report()
+
+ts_p3 %>%
+  autoplot(threegc) +
+  autolayer(fit_stochastic %>% fabletools::forecast(h = 52),
+    colour = "#0072B2", alpha=0.5, level = 95)+
+  autolayer(fit_determ %>% fabletools::forecast(h = 52),
+    colour = "#D55E00", alpha=0.5, level = 95)+
+    autolayer(fit_auto %>% fabletools::forecast(h = 52),
+    colour = "red", alpha=0.2, level = 95)
+
+fits<-ts_p3 %>%
   # Restrict data so models use same fitting period
-  mutate(ed_3gc = c(NA, NA, NA,NA, ts_p3$`3gc`[5:80])) %>%
+  mutate(noncarb = c(NA, NA, NA,NA,NA,NA, ts_p3$noncarb[7:80])) %>%
   # Estimate models
   model(
-    lag0 = ARIMA(3gc ~ pdq(d = 0) + TVadverts),
-    lag1 = ARIMA(Quotes ~ pdq(d = 0) +
-                 TVadverts + lag(TVadverts)),
-    lag2 = ARIMA(Quotes ~ pdq(d = 0) +
-                 TVadverts + lag(TVadverts) +
-                 lag(TVadverts, 2)),
-    lag3 = ARIMA(Quotes ~ pdq(d = 0) +
-                 TVadverts + lag(TVadverts) +
-                 lag(TVadverts, 2) + lag(TVadverts, 3))
+    lag0 = ARIMA(noncarb ~ pdq(d = 1) + difference(gmneg_all_clinical)),
+    lag1 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))),
+    lag2 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))),
+    lag3 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))),
+    lag4 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))),
+    lag5 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))+
+                   lag(difference(gmneg_all_clinical,5))),
+    lag6 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))+
+                   lag(difference(gmneg_all_clinical,5))+
+                   lag(difference(gmneg_all_clinical,6))))
+
+fitnoncarb <- ts_p3 %>%
+  model(
+    aicc = VAR(vars(gmneg_all_clinical, noncarb)),
+    bic = VAR(vars(gmneg_all_clinical, noncarb) ~ AR(6), ic = "bic")
   )
-# Prepare differenced time-series
-pre_icarba$gmneg_diff <-  tsibble::difference(pre_icarba$gmneg_all_bsi, lag =1, differences = 1)
-pre_icarba$carbapenem_diff <-  tsibble::difference(pre_icarba$carbapenem, lag =1, differences = 1)
-pre_icarba_ed2 <- pre_icarba [2:72,] %>% as_tsibble(index="date")
-pre_icarba_ed4 <- pre_icarba [4:72,] %>% as_tsibble(index="date")
+fitnoncarb <- ts_p3 %>% model(VAR(vars(gmneg_all_clinical, noncarb) ~ AR(6), ic = "bic"))
 
-# Explore cross-correlations with raw data
-CCF(pre_icarba, carbapenem, gmneg_all_bsi, lag_max=24) %>% autoplot(level=95)
-
-# Explore cross-correlations with differenced data
-CCF(pre_icarba_ed2, carbapenem_diff, gmneg_diff, lag_max=24)%>% autoplot(level=95)
-
-# Identify an ARIMAX model for carbapenems 
-carba_pre1 <- pre_icarba %>% model(ARIMA(carbapenem~ -1 + pdq(1,1,0)+PDQ(0,0,0)+lag(gmneg_all_bsi,2)))
-report(carba_pre1)
-carba_pre1 %>%  gg_tsresiduals() 
-
-carba_pre2 <- pre_icarba_ed2 %>% model(ARIMA(carbapenem  ~ -1 + pdq(1,1,0)+PDQ(0,0,0)+lag(gmneg_diff,2)))
-report(carba_pre2)
-carba_pre2 %>%  gg_tsresiduals() 
-
-# Looking at the correlation between gm neg BSI and differenced gm neg BSI (y-axis)
-gmneg_bsi<- pre_icarba$gmneg_all_bsi[1:71]
-differenced_gm_negbsi <- pre_icarba$gmneg_diff [2:72]
-gmneg <- cbind(gmneg_bsi,differenced_gm_negbsi )
-gmneg <-gmneg %>% as_tibble()
-cor(gmneg$gmneg_bsi, gmneg$differenced_gm_negbsi)
-ggplot(gmneg, aes(gmneg_bsi,differenced_gm_negbsi))+geom_point()
-
-
+fitnoncarb %>%
+  fabletools::forecast() %>%
+  autoplot()
 
 ```
 
@@ -277,7 +383,6 @@ We create three data sets representing periods before interventions 1 to 3 allow
 ts_p1 <- tswide_clean %>% filter (phase <=1)
 
 ts_p2<- tswide_clean %>% filter (phase <=2)
-date_icarba<-ts_p2_pre_icarba$date
 
 ts_p3 <- tswide_clean %>% filter (phase <=3)
 

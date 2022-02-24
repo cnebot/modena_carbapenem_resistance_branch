@@ -36,15 +36,18 @@ renv::activate()
 
 ```
 
-## 1.3 Load required packages and customised plot theme
+## 1.2 Load required packages and customised plot theme
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 library(tidyverse) # to enable tidyverse functions
+library(scales) # additional functions for ggplot
+library(labelled) # adding labels to variables (to appear in outputs)
 library(earth) # for MARS
 library(tseries) # for working with TS data
 library(tsutils) #
 library(forecast) # for forcasting
 library(fpp3) # enables tsibble, and fable packages
+library(timetk) # furtehr functions for wrangling and working with time-series
 library(plotmo) # plotting MARS model from earth
 library(mgcv) # for GLM and GAM models
 library(itsadug) # additional functions for GAM and GAMM models
@@ -57,6 +60,7 @@ library(lattice)
 library(viridis) # for viridis colour palettes
 library(hrbrthemes) #for plot themes
 library(sysfonts) # for using google fonts
+library(imputeTS) # for imputing missing TS values
 library(lubridate) # for working with datetime variables
 library(car) # for Cook's distances
 library(strucchange) # for detecting structural changes in time-series
@@ -73,91 +77,327 @@ source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth 
 
 ```
 
-## 1.4 Load data and process
-```{r message=FALSE, warning=FALSE, results='hide'}
+
+
+## 1.3 Load data and process
+```{r warning=FALSE, include=FALSE, messages=FALSE, results='hide'}
+
+#### 1) Read in and prepare "wide" format TS dataset ########
 
 # Read in the main data 
-main <- read_csv ("../Data/raw data/modena_final.csv", show_col_types =FALSE)
-date <- tibble(date = as.Date("2008-01-01")+0:131)
-main <- cbind(date,main) %>% dplyr::select(!c(Month, study_m))
+main <- read_excel("../Data/raw data/modena_final_2008_2018.xlsx")
 
-# Create wide as a time-series indexed table (tsibble)
+# Add date variable
+main$date <- yearmonth(seq(as.Date("2008-01-01"), as.Date("2018-12-31"), 
+                      by = "1 month"))
+
+# Add pc_variables
+
+
+# Calculate incidences and create a time-series table (tsibble) with date as the index
 tswide <- main %>% mutate(
-  across(gmneg_all_bsi:crpa_cohca_swab,~./obd*10000),
-  across(abhr: rectalswab, ~./obd*1000))  %>% 
+  across(gmneg_all_bsi:crpa_cohca_swab,~./obds*10000),
+  across(abhr: rectalswab, ~./obds*1000))  %>% 
   as_tsibble(index = date)
 
-```
+#  Select variables to evaluate for outliers (abx, obds, bed-occupancy, IPC)
+wide_clean <- tswide %>% as_tibble %>% 
+  dplyr::select(date, obds, bedocc,abhr:all_monitor_abx)
 
-## 1.5 Outlier detection and time-series cleaning
-```{r message=FALSE, warning=FALSE, results='hide'}
-
-# outlier detection and replacement with cleaned values
-wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obd, bedocc,abhr:all_monitored)
-
-newabx.matrix<-rep(0,132)
+# Apply outlier detection /cleaning function and replace original variables
+newabx.matrix<-rep(0,132) # creates empty matrix
 for(i in 1:length(wide_clean[1,])){
 abx<- wide_clean[,i]
 newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
 newabx.matrix <-cbind(newabx.matrix, newabx)
 }
-
 newabx.matrix<-newabx.matrix[,-1]
 
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
 newabx.matrix<- newabx.matrix[,!colnames(newabx.matrix) %in% 'date']
 
-tmp <-tswide %>% dplyr::select(!c(date, obd,bedocc,
-abhr:all_monitored))
+tmp <-tswide %>% dplyr::select(!c(date, obds,bedocc,abhr:all_monitor_abx))
 
-tswide_clean <- cbind(newabx.matrix,tmp) %>% as_tsibble(index=date)
+tswide_clean<-cbind(newabx.matrix,as.data.frame(tmp)) %>% as_tsibble(index=date)
+
+tswide_clean <- tswide_clean %>% mutate(
+  noncarb = fq+`3gc`+pseudo_3gc+other_monitor_abx,
+  ceph = `3gc`)
+
+# Remove temporary data
 rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
-```
+# Create percentage 
+
+# label data
+tswide_clean<- tswide_clean %>%
+  set_variable_labels(
+    bedocc= "Bed-occupancy (%)",
+    abhr= "Alcohol-based hand rub use",
+    rectalswab = "Rectal swabs",
+    fq = "Fluoroquinolones",
+    pseudo_3gc="Anti-pseudomonal cephalosporins",
+    other_monitor_abx = "Other monitored antibiotics",
+    all_monitor_abx = "All monitored antibiotics",
+    phase = "Intervention phase",
+    gmneg_all_clinical="Gram negative infections",
+    ecoli_esbl_all_clinical="ESBL+ E.coli infections")
 
 
-## 1.6 Trend decomposition
-```{r message=FALSE, warning=FALSE, results='hide'}
 
 
-# create long format data for incidence
+# create datasets for preintervention periods or sub-periods
+tswide_clean$phase <-as_factor(tswide_clean$phase)
+tswide_clean_p1 <- tswide_clean %>% filter(phase=="1")
+tswide_clean_p2 <- tswide_clean %>% filter(phase=="2")
+tswide_clean_p3 <- tswide_clean %>% filter(phase=="3")
+tswide_clean_p4 <- tswide_clean %>% filter(phase=="4")
+ts_i1 <- tswide_clean %>% filter(phase =="1")
+ts_i2 <- tswide_clean %>% filter(phase =="1" | phase=="2")
+ts_i3 <- tswide_clean %>% filter(!phase =="4")
 
-tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
+
+
+#### 2) Generate "long" format dataset for microbial data ########
+# for incidences
+tslong <- tswide_clean %>% 
+  dplyr::select(!c(obds:year,
+                   int_carb_asp:ecoli_esbl_all_bsi,noncarb,ceph)) %>%
   pivot_longer(
   cols = csab_all_any:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
   names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
-  values_to="incidence") %>% filter(pop!="NA") 
-
+  values_to="incidence") %>% filter(pop!="NA")
 
 tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
-tslong_bugs <- tslong %>% dplyr::select(!c(bedocc:int_asp)) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+tslong<- tslong %>% group_by(bugs) %>%
+  mutate (incidence_bc = box_cox_vec(incidence,silent=T))
+
+tslong$phase <-as_factor(tslong$phase)
+tslong_p1 <- tslong %>% filter(phase=="1")
+tslong_p2 <- tslong %>% filter(phase=="2")
+tslong_p3 <- tslong %>% filter(phase=="3")
+tslong_p4 <- tslong %>% filter(phase=="4")
+
+# for percentages
+tslong_pc <- main %>%  as_tsibble(index=date) %>%
+  dplyr::select(c(date,phase,csab_all_any:crpa_cohca_swab)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
+  values_to="nums") %>% 
+  filter(pop!="NA") 
+
+tslong_pc<- tslong_pc %>% 
+  mutate (bugs = paste(org,pop,site)) %>%
+  pivot_wider(names_from=IR, values_from=nums) %>%
+  mutate(pc_cro=cr/(cr+cs))
 
 
-tslongbugs <- tslong_bugs %>% filter(pop=="hca" | pop=="conothca")
+tslong_pc$phase <-as_factor(tslong_pc$phase)
+tslong_pc_p1 <- tslong_pc %>% filter(phase=="1")
+tslong_pc_p2 <- tslong_pc %>% filter(phase=="2")
+tslong_pc_p3 <- tslong_pc %>% filter(phase=="3")
+tslong_pc_p4 <- tslong_pc %>% filter(phase=="4")
 
-decompose <- function(data, y, ...){
-    y <- enquo(y)
-    dvar <- data %>% pull(!!y) %>% as.ts()
-    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
-                                 season(window =13), 
-                               robust = TRUE)) %>%
-      components()
-    data <-cbind(data,tmpd[,3:6])
-}
+#Create nested long datasets
+tslong_cro_nested <- tslong %>% group_by(bugs,IR,org,pop,site) %>% nest() 
 
-ts_decomp <- tslongbugs %>% 
-    mutate(decs = map(data, decompose, y = incidence)) %>%
-    dplyr::select(-data) %>% unnest(decs) %>% ungroup()
-
-ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
-
+tslong_pc_cro_nested <- tslong_pc %>% 
+  dplyr::filter(site=="clinical" |site=="swab") %>% 
+  group_by(bugs,org,pop,site) %>% 
+  nest() 
 
 ```
 
 
-#  2 Regional & national trends
+# 2. Descriptives table by period
+
+
+# 3. Description of CRO and CSO time-series
+
+## 3.1 Comparison of seasonality
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+## Look at seasonality
+seasonlook <- tslong %>% dplyr::select(bugs, incidence) %>%
+  features(incidence, feat_stl)
+incidences <- tslong %>% as_tibble() %>% group_by(bugs, IR, pop, site, org) %>% summarise("Mean monthly incidence rate" =mean(incidence))
+
+seasonlook<-left_join (seasonlook, incidences, by=c("IR","pop","site","org"))
+
+seasonlook$IR <- fct_recode(seasonlook$IR, 
+                            "Carbapenem sensitive"="cs", 
+                            "Carbapenem resistant"="cr")
+seasonlook$org <- fct_recode(seasonlook$org, 
+                            "A.baumannii"="ab", "K.pneumoniae"="kp", 
+                            "P.aeruginosa"="pa")
+seasonlook$pop <- fct_recode(seasonlook$pop, 
+                            "HCA"="hca", "CO-HCA"="cohca", "All"="all",
+                            "HO-HCA"="ho", "Non-HCA"="conothca")
+seasonlook$site <- fct_recode(seasonlook$site, "all"="any")
+
+
+seasonlook$peak =seasonlook$seasonal_peak_year+1
+require(lubridate)
+seasonlook <- seasonlook %>% mutate(month=parse_date_time(peak, "%m"))
+
+seasonality<- ggplot(seasonlook %>% filter(site=="clinical"),
+       aes(x=month, 
+           y = seasonal_strength_year, 
+           size=`Mean monthly incidence rate` , 
+           col = pop, fill=pop)) +
+  geom_point(alpha=0.4) +
+  facet_grid(org~IR)+
+  scale_color_viridis_d(option="A", begin=0.2,end=0.8)+
+  scale_x_datetime("Month of seasonal peak", 
+                   labels=date_format("%b"))+
+  scale_y_continuous("Strength of seasonality", limits=c(0,0.75))+
+  theme_pnaat()
+
+seasonality
+
+seasonality_inf_cr<- ggplot(
+  seasonlook %>% filter(site=="clinical" & IR=="Carbapenem resistant"),
+       aes(x=month, 
+           y = seasonal_strength_year, 
+           size=`Mean monthly incidence rate` , 
+           col = pop, fill=pop)) +
+  geom_point(alpha=0.4) +
+  facet_grid(org~.)+
+  scale_color_viridis_d(option="A", begin=0.2,end=0.8)+
+  scale_x_datetime("Month of seasonal peak", 
+                   labels=date_format("%b"))+
+  scale_y_continuous("Strength of seasonality", limits=c(0,0.75))+
+  theme_pnaat()
+
+seasonality_inf_cr
+
+seasonality_inf_cs<- ggplot(
+  seasonlook %>% filter(site=="clinical" & IR=="Carbapenem sensitive"),
+       aes(x=month, 
+           y = seasonal_strength_year, 
+           size=`Mean monthly incidence rate` , 
+           col = pop, fill=pop)) +
+  geom_point(alpha=0.4) +
+  facet_grid(org~.)+
+  scale_color_viridis_d(option="A", begin=0.2,end=0.8)+
+  scale_x_datetime("Month of seasonal peak", 
+                   labels=date_format("%b"))+
+  scale_y_continuous("Strength of seasonality", limits=c(0,0.75))+
+  theme_pnaat()
+
+seasonality_inf_cs
+```
+
+## 3.2 Plot of TS 
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% dplyr::pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 21) + 
+                                 season(window =13), 
+                               robust = TRUE)) %>%
+      components()
+    data <-dplyr::bind_cols(data,tmpd[,3:6]) %>% as_tibble()
+}
+
+# TS decomposition for incidence
+ts_decomp <- tslong_cro_nested %>% 
+    mutate(decs = map(data, decompose, y = incidence_bc)) %>%
+    dplyr::select(-data) %>% unnest(decs)
+
+ts_decomp$inf <- if_else(ts_decomp$site=="swab","swab","clinical")
+ts_decomp <-ts_decomp %>% mutate(
+  time = ym(as.character(date)))
+ts_decomp$IR <-as_factor(ts_decomp$IR)
+ts_decomp$org <-as_factor(ts_decomp$org)
+
+ts_decomp$IR <- fct_recode(
+  ts_decomp$IR, "Carbapenem sensitive"="cs", "Carbapenem resistant"="cr")
+ts_decomp$org <- fct_recode(
+  ts_decomp$org, "A.baumannii"="ab", "K.pneumoniae"="kp","P.aeruginosa"="pa")
+
+ts_decomplong<- ts_decomp %>% pivot_longer(cols=c("trend","season_year","remainder"),names_to="component")
+
+# TS decomposition for percentages
+ts_decomp_pc <- tslong_pc_cro_nested %>% 
+    mutate(decs = map(data, decompose, y = pc_cro)) %>%
+    dplyr::select(-data) %>% unnest(decs)
+
+
+
+
+cro_mainplot<- ggplot(ts_decomp %>% 
+    filter(pop=="hca" & site=="clinical" & IR=="Carbapenem resistant"), 
+       aes(time, trend, color=org, ))+
+  geom_line()+
+  geom_line(aes(x=time, y=incidence), alpha=0.3)+
+  facet_grid(org~., scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="none")
+
+cso_mainplot<- ggplot(ts_decomp %>% 
+    filter(pop=="hca" & site=="clinical" & IR=="Carbapenem sensitive"), 
+       aes(time, trend, color=org, ))+
+  geom_line()+
+  geom_line(aes(x=time, y=incidence), alpha=0.3)+
+  facet_grid(org~., scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)", limits=c(0,NA))+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="none")
+
+
+pc_plot<- ggplot(
+  ts_decomp %>% filter(pop=="hca" & site=="clinical"), 
+       aes(time, trend, color=org, ))+
+  geom_line()+
+  geom_line(aes(x=time, y=incidence), alpha=0.3)+
+  facet_grid(org~IR, scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)", limits=c(0,NA))+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")
+
+layout <- "AAAAABBBBBC"
+
+cro_mainplot+ cso_mainplot
+
+```
+
+
+#  4. Regional & national trends
 
 ## 2.1 preparation of data
 ```{r  message=FALSE, warning=FALSE,  results='hide', cache= TRUE}
