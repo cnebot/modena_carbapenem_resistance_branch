@@ -64,7 +64,6 @@ library(sysfonts) # for using google fonts
 library(lubridate) # for working with datetime variables
 library(car) # for Cook's distances
 library(strucchange) # for detecting structural changes in time-series
-library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 library(mgcViz) # for plots and model checks of GAM
@@ -189,7 +188,7 @@ The primary study outcomes of interest are for each CRO
 3.2.3   CRPa hca clinical
 3.2.4   CRKp conothca clinical,
 3.2.5   CRAb conothca bsi
-3.2.6   CRPa hca clinical,
+3.2.6   CRPa conothca clinical,
 
 ### 3.2.1 Automated
 ```{r warning=FALSE, include=FALSE, messages=FALSE, results='hide'}
@@ -217,6 +216,8 @@ tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_nsdiffs,.period=12)
 tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_kpss)
 tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_ndiffs) 
 tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_nsdiffs,.period=12)
+
+
 
 #### Fit best manual and auto ARIMA on transformed data
 arima_crkp_hca_bc <- tswide_clean %>% model(
@@ -550,6 +551,74 @@ augment(arima_crpa_conothca_bc) %>%
 
 ## 3.3 Antibiotic and IPC time series
 
+
+### 3.2.6 non-HCA-CRPa clinical (*crpa_conothca_clinical*)
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+##### Create noncarb abx variable
+ts_p3 <- ts_p3 %>% mutate(noncarb= fq+pseudo_3gc+`3gc`+other_monitor_abx)
+
+#### Plot data, ACF, PACF
+ts_p3 %>% gg_tsdisplay(noncarb, "partial")
+
+
+#### Is the series stationary? Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+ts_p3 %>% features(noncarb, unitroot_kpss)
+ts_p3 %>% features(noncarb, unitroot_ndiffs) 
+ts_p3 %>% features(noncarb, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(ts_p3$noncarb, .period=12L)
+
+#### create new transformed variable
+ts_p3$noncarb_bc <- (((ts_p3$noncarb)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+ts_p3 %>% gg_tsdisplay(noncarb_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
+ts_p3 %>% features(noncarb_bc, unitroot_kpss) # marginal
+ts_p3 %>% features(noncarb_bc, unitroot_ndiffs) 
+ts_p3 %>% features(noncarb_bc, unitroot_nsdiffs,.period=12) 
+
+ts_p3 %>% gg_tsdisplay(difference(noncarb_bc), "partial")  
+
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
+
+
+(stepwise_noncarb <- forecast::auto.arima( ts_p3$noncarb_bc,  trace=T, stepwise=T))
+
+
+glance(arima_crpa_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crpa_conothca  %>% dplyr::select(arima_crpa_conothca_101) %>% gg_tsresiduals() # compare models
+arima_crpa_conothca %>% dplyr::select(stepwise_crpa_conothca) %>% gg_tsresiduals() # compare models
+
+
+#### Fit best manual and auto ARIMA on transformed data
+arima_crpa_conothca_bc <- ts_p3 %>% model(
+  arima_crpa_conothca_bc_011 = ARIMA(
+    noncarb_bc ~ pdq(0,1,1)),
+  arima_crpa_conothca_bc_101 = ARIMA(
+    noncarb_bc ~ pdq(1,0,1)),
+  arima_crpa_conothca_bc_001 = ARIMA(
+    noncarb_bc ~ pdq(0,0,1)),
+  stepwise_crpa_conothca_bc = ARIMA(
+    noncarb_bc)) 
+
+glance(arima_crpa_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+
+arima_crpa_conothca_bc  %>% dplyr::select(arima_crpa_conothca_bc_011) %>% gg_tsresiduals() # compare models
+arima_crpa_conothca_bc %>% dplyr::select(stepwise_crpa_conothca_bc) %>% gg_tsresiduals() # compare models
+
+#### Check portmanteau tests of best fit option
+augment(arima_crpa_conothca_bc) %>% 
+  filter(.model=='arima_crpa_conothca_bc_011') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
+
+
+
+```
+
 ```{r}
 
 # Nb: we use the pre-intervention dataset "ts_p2_pre_icarba" for fitting the baseline ARIMA with exogenous variables (ARIMAX) for carbapenems. For other antibiotics we should use the  "ts_p3_pre_iabs_iunivscr" data
@@ -658,13 +727,12 @@ CCF(ts_p3, difference(cephs),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
 
 
-%>%
-  # Restrict data so models use same fitting period
-  mutate(ed_3gc = c(NA, NA, NA,NA, ts_p3$`3gc`[5:80])) %>%
-  # Estimate models
+
+arimax_gmneg_oabx <- ts_p3 %>% 
+  mutate(noncarb =c(NA,NA,NA,NA,NA,NA, noncarb[7:80])) %>%
   model(
     lag0 = ARIMA(3gc ~ pdq(d = 0) + TVadverts),
-    lag1 = ARIMA(Quotes ~ pdq(d = 0) +
+    lag1 = ARIMA(noncarb ~ pdq(d = 0) +
                  TVadverts + lag(TVadverts)),
     lag2 = ARIMA(Quotes ~ pdq(d = 0) +
                  TVadverts + lag(TVadverts) +
