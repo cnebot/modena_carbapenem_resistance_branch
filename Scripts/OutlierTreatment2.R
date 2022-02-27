@@ -26,21 +26,23 @@ if(!is.ts(y)) y<-ts(y,frequency=freq, start=start.date)
   
   
 # Parameters
-ld<-level.detection        # Cook's distance to determine Outlier 
+ld<-level.detection         # Cook's distance to determine Outlier 
 r<-radius                   # radius for mean around outlier position for substitution 
 
 # Characteristics of the series
 l<-length(y)
 
-# Looking for breakpoints for mainsegments
+# Looking for breakpoints for main segments
 
 bp.y <- breakpoints(y ~ 1)
 summary(bp.y)
 breakpoints(bp.y)
 split<-bp.y$breakpoints
+
+if(!any(is.na(split))){
 breakdates(bp.y)
 splitd<-breakdates(bp.y)
-ci.y <- confint(bp.y)
+#ci.y <- confint(bp.y)
 
 
 ls<- length(split)
@@ -49,7 +51,7 @@ fm0 <- lm(y ~ 1)
 fm1 <- lm(y ~ breakfactor(bp.y, breaks = length(split)))
 
 ## confidence interval
-ci.y <- breakdates(confint(bp.y))
+#ci.y <- breakdates(confint(bp.y))
 
 
 # Split into subseries
@@ -73,8 +75,8 @@ for(i in 1:I(ls+1)){
   nam.df <- paste("adf.yy", i, sep = "")
   print(get(nam.df))
   }
-}
-
+ }
+}else{ls<-0; yy1<-y;split.components<-c(1,l+1)}
 
 # Outlier detection by subseries and substitute in ynew the mean value 
 ynew<-y
@@ -94,7 +96,7 @@ if(length(outliers1)!=0){
   
   for(k in 1:length(outliers1)){
     j<-outlier.pos1[k]+(split.components[i]-1)
-    ball<-y[I(j-r):I(j+r)]
+    ball<-y[max(I(j-r),1):I(j+r)]
     numball<-2*r-(sum(is.na(ball)))
     ynew[j]<-(sum(ball,na.rm=T)-y[j])/(numball)
     }
