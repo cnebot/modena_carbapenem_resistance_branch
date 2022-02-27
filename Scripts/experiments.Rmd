@@ -32,8 +32,8 @@ if(!require(renv)){
 
 Sys.setenv(LOCALAPPDATA=renv::paths$library())
 renv::restore()
-
-
+renv::activate()
+renv::snapshot()
 
 ```
 
@@ -57,13 +57,13 @@ library(smooth) # install.packages("smooth",destdir = "C://R")
 library(lmtest) # comparing models 
 library(stats)
 library(grid)
-library(lattice) # install.packages("lattice",destdir = "C://R")
 library(viridis) # for viridis colour palettes
 library(hrbrthemes) #for plot themes
 library(sysfonts) # for using google fonts
 library(lubridate) # for working with datetime variables
 library(car) # for Cook's distances
 library(strucchange) # for detecting structural changes in time-series
+library(ganttrify) # for time lines (Gantt type)
 library(patchwork) # for combining different plot types
 library(missForest) # for missing value imputation by random forest
 library(mgcViz) # for plots and model checks of GAM
@@ -73,11 +73,6 @@ library(feasts)
 library(fpp3)
 library(AID)
 library(readxl)
-library(vars) # VARS/vECM model functions
-library(urca) # Johansen and related cointegration tests
-library(MTS)
-library(timetk)
-
 source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
 source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing.
 ```
@@ -100,18 +95,20 @@ tswide <- main %>% mutate(
   across(abhr: rectalswab, ~./obds*1000))  %>% 
   as_tsibble(index = date)
 
+```
 
-## Outlier detection and time-series cleaning
+## 1.4 Outlier detection and time-series cleaning
+
+```{r, messages=FALSE, warning=FALSE}
+
 
 # outlier detection and replacement with cleaned values
-wide_clean <- tswide %>% as_tibble %>% 
-  dplyr::select(obds, bedocc, abhr:crpa_cohca_swab)
+wide_clean <- tswide %>% as_tibble %>% dplyr::select(date, obds, bedocc,abhr:all_monitor_abx)
                                                      
 newabx.matrix<-rep(0,132)
-
 for(i in 1:length(wide_clean[1,])){
 abx<- wide_clean[,i]
-newabx<- OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
+newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
 newabx.matrix <-cbind(newabx.matrix, newabx)
 }
 
@@ -120,41 +117,252 @@ newabx.matrix<-newabx.matrix[,-1]
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
 newabx.matrix<- newabx.matrix[,!colnames(newabx.matrix) %in% 'date']
 
-tmp <-tswide %>% dplyr::select(!c(obds, bedocc, abhr:crpa_cohca_swab))
+tmp <-tswide %>% dplyr::select(!c(date, obds,bedocc,abhr:all_monitor_abx))
 
 tswide_clean<-cbind(newabx.matrix,as.data.frame(tmp)) %>% as_tsibble(index=date)
+#tswide_clean <- dplyr::bind_cols(newabx.matrix,tmp) %>% as_tsibble(index=date)
 rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 
-# generate new vars after box-cox transformation
-tswide_clean <- tswide_clean %>% mutate(across(
-  c(abhr:ecoli_esbl_all_bsi, allab_all_clinical:crpa_cohca_swab, cephs,noncarb), box_cox_vec,.names="{.col}_bc"))
+```
 
+## 1.5 Trend decomposition
+
+```{r, messages =FALSE, warning=FALSE}
+
+# create long format data for incidence
+
+tslong <- tswide_clean %>% dplyr::select(!c(hh_adherence:mrsa_all_bsi)) %>%
+  pivot_longer(
+  cols = csab_all_any:crpa_cohca_swab,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
+  values_to = "incidence") %>% filter(pop!="NA") 
+
+tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
+
+tslong <- tslong %>% dplyr::select(-bedocc) %>% group_by(bugs,IR,org,pop,site) %>% nest() 
+
+
+tswide_clean %>%
+  model(
+    STL(gmneg_all_clinical ~ trend(window = 21) +
+                   season(window = 5),
+    robust = TRUE)) %>%
+  components() %>%
+  autoplot()
+
+
+
+tslongbugs<- tslong %>% filter(pop=="hca" | pop=="conothca")
+
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
+                                 season(window =13), robust = TRUE)) %>%
+      components()
+}
+
+ts_decomp <- tslongbugs %>% 
+    mutate(decs = map(data, decompose, y = incidence)) %>%
+    dplyr::select(-data)
+
+ts_decomp <- ts_decomp %>% unnest(decs)
+ts_decomp$decs <-map(ts_decomp$decs, ~.x[[1]]$x)
+beer_fc$Beer <- map(beer_fc$Beer, ~ .x[[1]]$x)
+beer_fc %>%
+       unnest(c(Beer))
+
+ts_decomp <- ts_decomp %>% mutate (trend=if_else(trend <0, 0, trend))
+
+
+```
+
+
+# Experiments
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+### Generate new variable
+tswide_clean <-tswide_clean %>% mutate(
+  noncarb= fq+`3gc`+pseudo_3gc+other_monitor_abx,
+  threegc =`3gc`)
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$noncarb, .period=12L)
+lambda2<-guerrero(tswide_clean$gmneg_all_clinical, .period=12L)
+lambda3<-guerrero(tswide_clean$carbapenem, .period=12L)
+lambda4<-guerrero(tswide_clean$threegc, .period=12L)
+
+#### create new box-cox transformed variables
+tswide_clean$noncarb_bc <- 
+  (((tswide_clean$noncarb)^lambda)-1)/lambda
+tswide_clean$gmneg_all_clinical_bc <-
+  (((tswide_clean$gmneg_all_clinical)^lambda2)-1)/lambda2
+tswide_clean$carbapenem_bc <-
+  (((tswide_clean$carbapenem)^lambda3)-1)/lambda3
+tswide_clean$threegc_bc <- 
+  (((tswide_clean$threegc)^lambda4)-1)/lambda4
 
 # Derive pre-intervention time-series
 ts_p1 <- tswide_clean %>% filter (phase <=1)
 ts_p2<- tswide_clean %>% filter (phase <=2)
 ts_p3 <- tswide_clean %>% filter (phase <=3)
 
-# Generate long-format data
-tslong <- tswide_clean %>% 
-  dplyr::select(c(date, phase,
-                  allab_all_clinical:crpa_cohca_swab)) %>%
-  pivot_longer(
-  cols = allab_all_clinical:crpa_cohca_swab,
-  names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs|all)(ab|kp|pa)_(.*)_(.*)",
-  values_to="incidence") %>% filter(pop!="NA")
-
-tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
 
-tslong$phase <-as_factor(tslong$phase)
-tslong_p1 <- tslong %>% filter(phase=="1")
-tslong_p2 <- tslong %>% filter(phase=="2")
-tslong_p3 <- tslong %>% filter(phase=="3")
-tslong_p4 <- tslong %>% filter(phase=="4")
+############ Non-carbapenem Abx
+ts_p3 %>% gg_tsdisplay(difference(noncarb), "partial")
+ts_p3 %>% gg_tsdisplay(difference(noncarb_bc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(noncarb,12) %>%
+                         difference(), "partial")
+
+# Fit best manual and two auto ARIMAs
+fit <- ts_p3 %>% model(
+  manual=ARIMA(noncarb~ pdq(3,1,0)+PDQ(0,0,0)),
+  manual2=ARIMA(noncarb~ pdq(1,0,0)+PDQ(0,0,0)),
+  auto = ARIMA(noncarb~pdq(1,1,0)))
+  auto2 = ARIMA(noncarb, stepwise=FALSE))
+
+fit2<- auto.arima(ts_p3$noncarb, d=0, D=0, max.p=4, max.q=0, max.P=0, max.Q=0, start.p=4, ic="aic", allowdrift=TRUE)
+
+# see results
+glance(fit) # compare BIC, AICc etc
+fit %>% select(manual) %>% report() # see manual ARIMA
+fit %>% select(manual) %>% gg_tsresiduals() #see manual ARIMA residuals
+augment(fit) %>%
+  filter(.model=='manual') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+fit %>% select(auto) %>% report() # see first auto ARIMA
+fit %>% select(auto) %>% gg_tsresiduals() # see first auto ARIMA residuals
+augment(fit) %>%
+  filter(.model=='auto') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+fit %>% select(auto2) %>% report() #see second auto ARIMA
+fit %>% select(auto2) %>% gg_tsresiduals() #see second auto ARIMA resid
+augment(fit) %>%
+  filter(.model=='auto2') %>%
+  features(.innov, ljung_box, lag = 10, dof = 3) #Pormanteau test of residuals
+
+
+ts_p3 %>%
+  autoplot(noncarb) +
+  autolayer(fit %>% select(auto) %>% fabletools::forecast(h = 52),
+    colour = "blue", alpha=0.5, level = 95)+
+  autolayer(fit %>% select(auto)%>% fabletools::forecast(h = 52),
+    colour = "green", alpha=0.5, level = 95)+
+    autolayer(fit %>% select(manual)%>% fabletools::forecast(h = 52),
+    colour = "red", alpha=0.5, level = 95)
+
+
 
 ```
+
+
+ts_p3 %>% gg_tsdisplay(difference(carbapenem), "partial")
+ts_p3 %>% gg_tsdisplay(difference(carbapenem_bc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(threegc), "partial")
+ts_p3 %>% gg_tsdisplay(difference(threegc_bc), "partial")
+ts_p3 %>% features(noncarb, unitroot_kpss)
+ts_p3  %>% features(noncarb, unitroot_ndiffs) 
+ts_p3  %>% features(noncarb, unitroot_nsdiffs,.period=12) 
+ts_p3 %>% features(noncarb_bc, unitroot_kpss)
+ts_p3  %>% features(noncarb_bc, unitroot_ndiffs) 
+ts_p3  %>% features(noncarb_bc, unitroot_nsdiffs,.period=12) 
+
+ts_p3 %>% gg_tsdisplay(difference(crpa_hca_clinical), "partial") 
+crpa_hca_clin_diff1 <-  tsibble::difference(tswide_clean$crpa_hca_clinical, lag =1, differences = 1)
+tswide_clean %>% gg_tsdisplay(crpa_hca_clin_diff1, "partial")
+
+arimax_gmneg <- ts_p3 
+lambdafq<-guerrero(arimax_gmneg$fq, .period=12L)
+
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
+
+
+CCF(ts_p3, difference(threegc_bc), difference(gmneg_all_clinical), 
+    lag_max=24) %>% autoplot(level=95)
+
+CCF(ts_p3, difference(ecoli_esbl_all_clinical), 
+    difference(noncarb_bc), lag_max=24) %>% autoplot(level=95)
+
+
+fit_determ<-ts_p3 %>%
+  model(deterministic = ARIMA(threegc~1+trend()+ pdq(d = 0)))
+report(fit_determ)
+
+fit_stochastic <-ts_p3 %>%
+  model(stochastic = ARIMA(threegc~ pdq(d = 1)+PDQ(D=1)))
+report(fit_stochastic)
+
+fit_auto<-ts_p3 %>%
+  model(auto=ARIMA(threegc))
+fit_auto %>% report()
+
+ts_p3 %>%
+  autoplot(threegc) +
+  autolayer(fit_stochastic %>% fabletools::forecast(h = 52),
+    colour = "#0072B2", alpha=0.5, level = 95)+
+  autolayer(fit_determ %>% fabletools::forecast(h = 52),
+    colour = "#D55E00", alpha=0.5, level = 95)+
+    autolayer(fit_auto %>% fabletools::forecast(h = 52),
+    colour = "red", alpha=0.2, level = 95)
+
+fits<-ts_p3 %>%
+  # Restrict data so models use same fitting period
+  mutate(noncarb = c(NA, NA, NA,NA,NA,NA, ts_p3$noncarb[7:80])) %>%
+  # Estimate models
+  model(
+    lag0 = ARIMA(noncarb ~ pdq(d = 1) + difference(gmneg_all_clinical)),
+    lag1 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))),
+    lag2 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))),
+    lag3 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))),
+    lag4 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))),
+    lag5 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))+
+                   lag(difference(gmneg_all_clinical,5))),
+    lag6 = ARIMA(noncarb ~ pdq(d = 1) +
+                   difference(gmneg_all_clinical)+
+                   lag(difference(gmneg_all_clinical))+
+                   lag(difference(gmneg_all_clinical,2))+
+                   lag(difference(gmneg_all_clinical,3))+
+                   lag(difference(gmneg_all_clinical,4))+
+                   lag(difference(gmneg_all_clinical,5))+
+                   lag(difference(gmneg_all_clinical,6))))
+
+fitnoncarb <- ts_p3 %>%
+  model(
+    aicc = VAR(vars(gmneg_all_clinical, noncarb)),
+    bic = VAR(vars(gmneg_all_clinical, noncarb) ~ AR(6), ic = "bic")
+  )
+fitnoncarb <- ts_p3 %>% model(VAR(vars(gmneg_all_clinical, noncarb) ~ AR(6), ic = "bic"))
+
+fitnoncarb %>%
+  fabletools::forecast() %>%
+  autoplot()
+
+```
+
+
 
 # 3. Univariate ARIMAs
 
@@ -166,9 +374,23 @@ In addition to time-series decomposition applied to all variables (to facilitate
 
 
 ## 3.1 Preparation 
+### 3.1.1. Redefine timeseries datasets for ARIMAs
+We create three data sets representing periods before interventions 1 to 3 allowing characterisation oftemporal behaviour in time series before influence of each intervention.
 
-### 3.1.1 Auto arima function
-This function creates output from automated ARIMA from the 'forecast' package. 
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Derive pre-intervention time-series
+ts_p1 <- tswide_clean %>% filter (phase <=1)
+
+ts_p2<- tswide_clean %>% filter (phase <=2)
+
+ts_p3 <- tswide_clean %>% filter (phase <=3)
+
+```
+
+
+### 3.1.2 Auto arima function
+This function creates output from automated ARIMA from the 'forecast' package 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
 
 auto.arima.df <- function(data, y, ...){
@@ -188,71 +410,72 @@ The primary study outcomes of interest are for each CRO
 3.2.3   CRPa hca clinical
 3.2.4   CRKp conothca clinical,
 3.2.5   CRAb conothca bsi
-3.2.6   CRPa conothca clinical,
-
-### 3.2.1 Automated
-```{r warning=FALSE, include=FALSE, messages=FALSE, results='hide'}
-tslong
+3.2.6   CRPa hca clinical,
 
 
-```
 ### 3.2.1 HCA-CRKp clinical infections (*crkp_hca_clinical*)
 
 ```{r message=FALSE, warning=FALSE, include=TRUE}
 
-#### Plot data, ACF, PACF for series before and after differencing and Box-Cox transformation
+#### Plot data, ACF, PACF
+
+tswide_clean <- tswide_clean %>% as_tsibble(index=date)
+
 tswide_clean %>% gg_tsdisplay(crkp_hca_clinical, "partial")
-tswide_clean %>% gg_tsdisplay(difference(crkp_hca_clinical), "partial")
-tswide_clean %>% gg_tsdisplay(crkp_hca_clinical_bc, "partial")
-tswide_clean %>% gg_tsdisplay(difference(crkp_hca_clinical_bc), "partial")
 
 
 #### Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
+tswide_clean %>% features(crkp_hca_clinical, unitroot_kpss)
+tswide_clean %>% features(crkp_hca_clinical, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_hca_clinical, unitroot_nsdiffs,.period=12) 
+
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crkp_hca_clinical, .period=12L)
+
+#### create new transformed variable
+tswide_clean$crkp_hca_clinical_bc <- (((tswide_clean$crkp_hca_clinical)^lambda)-1)/lambda
+
+####  Plot the transformed variable, ACF, PACF
+tswide_clean %>% gg_tsdisplay(crkp_hca_clinical_bc, "partial")
+
+#### Repeat unit root tests and differencing number evaluations on the transformed data
 tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_kpss)
-tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_ndiffs) 
+tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_ndiffs)
 tswide_clean %>% features(crkp_hca_clinical_bc, unitroot_nsdiffs,.period=12) 
 
-### Repeat on differenced series
-tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_kpss)
-tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_ndiffs) 
-tswide_clean %>% features(difference(crkp_hca_clinical_bc), unitroot_nsdiffs,.period=12)
+tswide_clean %>% gg_tsdisplay(difference(crkp_hca_clinical_bc), "partial")  
 
+# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
+arima_crkp_ho <- tswide_clean %>% model(
+  arima_crkp_hca_101 = ARIMA(crkp_hca_clinical ~ pdq(1,0,1)),
+  stepwise_crkp_ho = ARIMA(crkp_hca_clinical)) 
+
+glance(arima_crkp_ho) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crkp_ho  %>% dplyr::select(arima_crkp_hca_101) %>% gg_tsresiduals() # compare models
+arima_crkp_ho %>% dplyr::select(stepwise_crkp_ho) %>% gg_tsresiduals() # compare models
 
 
 #### Fit best manual and auto ARIMA on transformed data
 arima_crkp_hca_bc <- tswide_clean %>% model(
-  arima_crkp_hca_bc_111 = ARIMA(box_cox(crkp_hca_clinical ~ pdq(1,1,1)),
-  arima_crkp_hca_bc_011 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,1,1)),
+  arima_crkp_hca_bc_111 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,1,1)),
+  arima_crkp_hca_bc_101_100 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,0,1) + PDQ(1,0,1)),
+    arima_crkp_hca_bc_011_100 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,1,1) + PDQ(1,0,0)),
   arima_crkp_hca_bc_101 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,0,1)),
-  stepwise_crkp_hca  =ARIMA(crkp_hca_clinical_bc))
+  arima_crkp_hca_bc_001 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,0,1)),
+  stepwise_crkp_hca_bc = ARIMA(crkp_hca_clinical_bc)) 
 
 glance(arima_crkp_hca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
-arima_crkp_hca_bc  %>% dplyr::select(arima_crkp_hca_bc_111) %>% gg_tsresiduals() # compare models
-arima_crkp_hca_bc  %>% dplyr::select(arima_crkp_hca_bc_011) %>% gg_tsresiduals() # compare models
-arima_crkp_hca_bc  %>% dplyr::select(arima_crkp_hca_bc_101) %>% gg_tsresiduals() # compare models
-arima_crkp_hca_bc %>% dplyr::select(stepwise_crkp_hca) %>% gg_tsresiduals() # compare models
+arima_crkp_hca_bc  %>% dplyr::select(arima_crkp_hca_bc_011_100) %>% gg_tsresiduals() # compare models
+arima_crkp_hca_bc %>% dplyr::select(stepwise_crkp_hca_bc) %>% gg_tsresiduals() # compare models
 
-#### Check portmanteau tests of best fit options
+#### Check portmanteau tests of best fit option
 augment(arima_crkp_hca_bc) %>% 
-  filter(.model=='arima_crkp_hca_bc_101') %>%
+  filter(.model=='arima_crkp_hca_bc_011_100') %>%
   features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
 
-augment(arima_crkp_hca_bc) %>% 
-  filter(.model=='stepwise_crkp_hca_bc') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
 
-### Plotting characteristic roots of best model
-tswide_clean %>%
-   model(ARIMA(crkp_hca_clinical ~ pdq(0,1,1))) %>%
-   gg_arma()
- 
-### Plotting best-fit model and forecast
-augment(arima_crkp_hca_bc) %>% 
-  filter(.model=='stepwise_crkp_hca_bc') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
 
-arima_crkp_hca_bc %>% dplyr::select(arima_crkp_hca_bc_101) %>% fabletools::forecast(h = "3 years")
 ```
 
 ### 3.2.2 HCA-CRAb clinical infections (*crab_hca_clinical*)
@@ -551,74 +774,6 @@ augment(arima_crpa_conothca_bc) %>%
 
 ## 3.3 Antibiotic and IPC time series
 
-
-### 3.2.6 non-HCA-CRPa clinical (*crpa_conothca_clinical*)
-```{r message=FALSE, warning=FALSE, include=TRUE}
-
-##### Create noncarb abx variable
-ts_p3 <- ts_p3 %>% mutate(noncarb= fq+pseudo_3gc+`3gc`+other_monitor_abx)
-
-#### Plot data, ACF, PACF
-ts_p3 %>% gg_tsdisplay(noncarb, "partial")
-
-
-#### Is the series stationary? Apply a unit root test to check if time-series stationary,  determine number of non-seasonal (ndiffs) and seasonal (nsdiffs) differences required to make stationary, and plot differenced time-series if required.
-ts_p3 %>% features(noncarb, unitroot_kpss)
-ts_p3 %>% features(noncarb, unitroot_ndiffs) 
-ts_p3 %>% features(noncarb, unitroot_nsdiffs,.period=12) 
-
-#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-lambda<-guerrero(ts_p3$noncarb, .period=12L)
-
-#### create new transformed variable
-ts_p3$noncarb_bc <- (((ts_p3$noncarb)^lambda)-1)/lambda
-
-####  Plot the transformed variable, ACF, PACF
-ts_p3 %>% gg_tsdisplay(noncarb_bc, "partial")
-
-#### Repeat unit root tests and differencing number evaluations on the transformed data
-ts_p3 %>% features(noncarb_bc, unitroot_kpss) # marginal
-ts_p3 %>% features(noncarb_bc, unitroot_ndiffs) 
-ts_p3 %>% features(noncarb_bc, unitroot_nsdiffs,.period=12) 
-
-ts_p3 %>% gg_tsdisplay(difference(noncarb_bc), "partial")  
-
-# fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
-
-
-(stepwise_noncarb <- forecast::auto.arima( ts_p3$noncarb_bc,  trace=T, stepwise=T))
-
-
-glance(arima_crpa_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
-arima_crpa_conothca  %>% dplyr::select(arima_crpa_conothca_101) %>% gg_tsresiduals() # compare models
-arima_crpa_conothca %>% dplyr::select(stepwise_crpa_conothca) %>% gg_tsresiduals() # compare models
-
-
-#### Fit best manual and auto ARIMA on transformed data
-arima_crpa_conothca_bc <- ts_p3 %>% model(
-  arima_crpa_conothca_bc_011 = ARIMA(
-    noncarb_bc ~ pdq(0,1,1)),
-  arima_crpa_conothca_bc_101 = ARIMA(
-    noncarb_bc ~ pdq(1,0,1)),
-  arima_crpa_conothca_bc_001 = ARIMA(
-    noncarb_bc ~ pdq(0,0,1)),
-  stepwise_crpa_conothca_bc = ARIMA(
-    noncarb_bc)) 
-
-glance(arima_crpa_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
-
-arima_crpa_conothca_bc  %>% dplyr::select(arima_crpa_conothca_bc_011) %>% gg_tsresiduals() # compare models
-arima_crpa_conothca_bc %>% dplyr::select(stepwise_crpa_conothca_bc) %>% gg_tsresiduals() # compare models
-
-#### Check portmanteau tests of best fit option
-augment(arima_crpa_conothca_bc) %>% 
-  filter(.model=='arima_crpa_conothca_bc_011') %>%
-  features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
-
-
-
-```
-
 ```{r}
 
 # Nb: we use the pre-intervention dataset "ts_p2_pre_icarba" for fitting the baseline ARIMA with exogenous variables (ARIMAX) for carbapenems. For other antibiotics we should use the  "ts_p3_pre_iabs_iunivscr" data
@@ -649,90 +804,42 @@ In this section we look at temporal correlations between variables hypothesised 
 * 4.2   ESBL E.coli infections and carbapenems
 * 4.4  Importation pressure and infections or colonisations (each CRO)
 * 4.5  Population interactions (hca vs. non-hca for each CRO)
-* 4.4  
+* 4.4   
 
 
-## 4.1 All GN infections and abx use
+## 4.1 Gram-Negative clinical infections and abx use
 
-### 4.1.2 All monitor abx
 ```{r message=FALSE, warning=FALSE, include=TRUE}
+#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
+lambda<-guerrero(tswide_clean$crpa_conothca_clinical, .period=12L)
 
-#----------------------------------------
-# Select variables
-X = ts_p2
-vars<- c("date", "cskp_all_clinical", "gmneg_all_clinical", "all_monitor_abx",
-  "ecoli_esbl_all_clinical")
-
-X <- X %>% as_tsibble() %>% dplyr::select(vars)
-
-Xlong<- X %>% as_tsibble() %>% pivot_longer(cols=(!date), names_to="variable",values_to="value")
-
-Xlongd<- Xlong %>% as_tibble () %>% 
-  group_by(variable) %>% 
-  mutate(diff_var = difference(value))
-
-X<- X %>% ts()
-#----------------
-# Plots
-tsplot<-ggplot(Xlongd, aes(date, value, color=variable))+
-  geom_line()+
-  facet_grid(variable~., scales="free_y")+
-  scale_y_continuous("Original variables")+
-  theme_pnaat()+
-  theme(panel.grid=element_blank())
-
-tsdplot <- ggplot(Xlongd, aes(date, 
- diff_var, color=variable))+
-  geom_line()+
-  geom_hline(yintercept=0, linetype="dashed",
-             color="grey")+
-  facet_grid(variable~., scales="free_y")+
-  scale_y_continuous("First differenced variables")+
-  theme_pnaat()+
-  theme(panel.grid=element_blank())
-
-tsplot+tsdplot+plot_layout(guides="collect")
-
-#----------------------------------------
-# Check for stationarity
+#### create new transformed variable
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
 
 
-#----------------------------------------
-# Check for stationarity
-
-adf.matrix<-rep(0,2) 
-
-adfs_and_diffs <-function(X){
-for(i in 1:length(X[1,])){
-endo_var<- X[,i]
-adf1<- adfTest(endo_var, type="c")@test$p.value 
-adf2<- adfTest(endo_var, type="ct")@test$p.value 
-adfs <-cbind(adf1,adf2)
-adf.matrix <-rbind(adf.matrix, adfs) 
-}
+# 3rd gen cephalosporins
+boxcox_fn <- function(x){
+  lambda <-guerrero(x, .period=12L)
+  paste0(x,"_bc")
   
-adf.matrix<-adf.matrix[-1,]
-nam<-c(paste0(colnames(X)))
-adftab<-cbind(nam,adf.matrix) %>% as_tibble() 
-adftab <-adftab %>% mutate(conclusion=
-  if_else(adf1<0.05,"stationary in level",
-          if_else(adf2<0.05, "stationary in trend","nonstationary")))
 }
+arimax_gmneg <- ts_p3 
+lambdafq<-guerrero(arimax_gmneg$fq, .period=12L)
 
-adfs <- adfs_and_diffs(X)
-adfs
-
-#
-CCF(ts_p3, difference(cephs),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
 
 
+CCF(ts_p3, difference(gmneg_all_clinical), 
+    difference(`3gc`), lag_max=24) %>% autoplot(level=95)
 
-arimax_gmneg_oabx <- ts_p3 %>% 
-  mutate(noncarb =c(NA,NA,NA,NA,NA,NA, noncarb[7:80])) %>%
+
+%>%
+  # Restrict data so models use same fitting period
+  mutate(ed_3gc = c(NA, NA, NA,NA, ts_p3$`3gc`[5:80])) %>%
+  # Estimate models
   model(
     lag0 = ARIMA(3gc ~ pdq(d = 0) + TVadverts),
-    lag1 = ARIMA(noncarb ~ pdq(d = 0) +
+    lag1 = ARIMA(Quotes ~ pdq(d = 0) +
                  TVadverts + lag(TVadverts)),
     lag2 = ARIMA(Quotes ~ pdq(d = 0) +
                  TVadverts + lag(TVadverts) +
@@ -770,50 +877,6 @@ gmneg <-gmneg %>% as_tibble()
 cor(gmneg$gmneg_bsi, gmneg$differenced_gm_negbsi)
 ggplot(gmneg, aes(gmneg_bsi,differenced_gm_negbsi))+geom_point()
 
-
-CCF(ts_p3, difference(cephs),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-
-CCF(ts_p3, difference(cephs),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(fq),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(pseudo_3gc),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(other_monitor_abx),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(all_monitor_abx),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(noncarb),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-
-
-CCF(ts_p3, difference(cephs),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(fq),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(pseudo_3gc),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(other_monitor_abx),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(all_monitor_abx),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
-
-CCF(ts_p3, difference(ecoli_esbl_all_clinical), difference(carbapenem),
-    lag_max=24) %>% autoplot(level=95)
-
-
 ```
 
 ```{r}
@@ -845,50 +908,25 @@ fq_pre2 %>%  gg_tsresiduals()
 ```
 
 
-### 4.1.3 Carbapenems
+### 3.3.2 Forecasting ABX with Gram-Neg BSIs
+
 ```{r}
 
-#--------------------------------------------------------------
-# Check for stationarity
-#--------------------------------------------------------------
-adf.test(ts_p2$carbapenem)
-unitroot_ndiffs(ts_p2$carbapenem)
-                
-auto.arima(ts_p2$carbapenem,
-           allowdrift = FALSE, 
-           allowmean=TRUE,
-           max.q = 0, 
-           xreg = cbind(lag(ts_p2$gmneg_all_bsi,2)))
-           
+adf.test(pre_icarba$carbapenem)
+unitroot_ndiffs(pre_icarba$carbapenem)
+auto.arima(pre_icarba$carbapenem,allowdrift = TRUE, allowmean=TRUE,max.q = 0,xreg = cbind(lag(pre_icarba$gmneg_all_bsi,2)))
 
-auto.arima(difference(ts_p2$carbapenem),
-           allowdrift = FALSE, 
-           allowmean=TRUE,
-           max.q = 0, 
-           xreg = cbind(lag(difference(ts_p2$gmneg_all_bsi),2)))
+model.pre_icarba.carba<-Arima(pre_icarba$carbapenem, order = c(1,0,0), include.drift = TRUE,xreg = lag(pre_icarba$gmneg_all_bsi,2))
+coeftest(model.pre_icarba.carba)
+Acf(model.pre_icarba.carba$residuals)
+AIC(model.pre_icarba.carba)
+
+gmneg_all_future  <-tswide_clean$gmneg_all_bsi[73:132]
+
+fore.icarba.carba<-forecast(model.pre_icarba.carba,h = 60, xreg = gmneg_all_future) 
+autoplot(fore.icarba.carba)
 
 
-arimax_carbapenem <-Arima(ts_p2$carbapenem, order = c(1,1,0), include.drift = FALSE)
-coeftest(arimax_carbapenem)
-Acf(arimax_carbapenem$residuals)
-AIC(arimax_carbapenem)
-
-arimax_carbapenem_enhanced <-Arima(ts_p2$carbapenem, order = c(1,1,0), include.drift = FALSE,xreg = lag(ts_p2$gmneg_all_bsi,2))
-coeftest(arimax_carbapenem_enhanced)
-Acf(arimax_carbapenem_enhanced$residuals)
-
-AIC(arimax_carbapenem_enhanced)
-
-gmneg_all_future  <-tswide$gmneg_all_bsi[73:132]
-
-carb_forecast <-forecast::forecast(
-  arimax_carbapenem,h = 60) 
-
-carb_forecast_enhanced<-forecast::forecast(
-  arimax_carbapenem_enhanced ,h = 60, xreg = gmneg_all_future)
-
-autoplot(carb_forecast)
-autoplot(carb_forecast_enhanced)
 ```
 ```{r}
 
@@ -932,369 +970,19 @@ autoplot(fore.icarba.x3gc)
 
 
 # 5. Interactions and VARs
-We used VAR/VECM to check the directionality of hypothesised relationships as described in the logic diagram of the paper.
-In particular we examined sub-systems as follows:
-5.1. Relations between general gram negative infection ecology & antibiotic use
-5.2. Inter-species competition
-5.3. Within-species (CSO vs. CRO) competition
-5.4  Relations between CRO burdens in HO-HCA, CO-HCA, and CO-non-HCA
-5.5  Relations between importation pressure and CRO burdens
-## 5.1 Define functions for VAR
-```{r}
 
-eval_var<-function(y, series, names){
-
-  # Make series to be stationary
- 
-dy=0; dseries=0
-
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(series), alpha=0.05)!=0){dseries<-unitroot_ndiffs(ts(series), alpha=0.05); series<-diff(ts(series), differences=dseries)}
-
-if(dy>dseries){series<-head(series,-I(dy-dseries))}
-if(dy<dseries){y<-head(y,-I(dseries-dy))}    
-
-assign(names[1],y)
-assign(names[2],series)
-
-  # Select order and estimate VAR
-matrix<-cbind(y,series)
-colnames(matrix)<-names
-
-var.fit <- vars::VAR(matrix,lag.max = 2, type=c("none"))
-summary(var.fit)
-  # Some test form var estimation
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-
-   # Impulse response function
-
-impulse.response <- vars::irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forecasts
-
-var.decomp<-fevd(var.fit)
-
-  # causality analysis
-
-causality<- list(cause.y=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger, cause.series=causality(var.fit, cause=names[2], boot=TRUE, boot.runs=1000)$Granger)
-
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-
-
-
-eval_var3<-function(x,y,z,names){
-
-
-  # Make series to be stationary
- 
-dx=0; dy=0 ; dz=0
-if(unitroot_ndiffs(ts(x), alpha=0.05)!=0){dx<-unitroot_ndiffs(ts(x), alpha=0.05);x<-diff(ts(x), differences=dx)}
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(z), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(z), alpha=0.05);z<-diff(ts(z), differences=dz)}
-
-maxd<-max(dx,dy,dz)
-
-if(dx<maxd){x<-head(x,-I(maxd-dx))}
-if(dy<maxd){y<-head(y,-I(maxd-dy))}    
-if(dz<maxd){z<-head(z,-I(maxd-dz))}    
-
-
-assign(names[1],x)
-assign(names[2],y)
-assign(names[3],z)
-
-  # Select order and estimate VAR
-matrix<-cbind(x,y,z)
-colnames(matrix)<-names
-
-var.fit <- VAR(matrix, lag.max =2)
-
-  # Some test form var estimation
-
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-   
-  # Impulse response function
-
-impulse.response <- irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forescats
-
-var.decomp<-fevd(var.fit)
-
-# causality analisys
-
-causality<- list(
-  cause.x=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger,
-  cause.y=causality(var.fit,  cause=names[2],boot=TRUE, boot.runs=1000)$Granger,
-  cause.z=causality(var.fit,  cause=names[3],boot=TRUE, boot.runs=1000)$Granger)
- 
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-
-eval_var4<-function(x,y,z,zz,names){
-
-
-  # Make series to be stationary
- 
-dx=0; dy=0 ; dz=0; dzz=0
-if(unitroot_ndiffs(ts(x), alpha=0.05)!=0){dx<-unitroot_ndiffs(ts(x), alpha=0.05);x<-diff(ts(x), differences=dx)}
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(z), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(z), alpha=0.05);z<-diff(ts(z), differences=dz)}
-if(unitroot_ndiffs(ts(zz), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(zz), alpha=0.05);zz<-diff(ts(zz), differences=dzz)}
-
-
-maxd<-max(dx,dy,dz,dzz)
-
-if(dx<maxd){x<-head(x,-I(maxd-dx))}
-if(dy<maxd){y<-head(y,-I(maxd-dy))}    
-if(dz<maxd){z<-head(z,-I(maxd-dz))}    
-if(dzz<maxd){zz<-head(zz,-I(maxd-dzz))}    
-
-assign(names[1],x)
-assign(names[2],y)
-assign(names[3],z)
-assign(names[4],zz)
-
-  # Select order and estimate VAR
-matrix<-cbind(x,y,z,zz)
-colnames(matrix)<-names
-
-var.fit <- VAR(matrix, lag.max =2)
-
-  # Some test form var estimation
-
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-   
-  # Impulse response function
-
-impulse.response <- irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forescats
-
-var.decomp<-fevd(var.fit)
-
-# causality analisys
-
-causality<- list(
-  cause.x=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger,
-  cause.y=causality(var.fit,  cause=names[2],boot=TRUE, boot.runs=1000)$Granger,
-  cause.z=causality(var.fit,  cause=names[3],boot=TRUE, boot.runs=1000)$Granger,  
-  cause.zz=causality(var.fit,  cause=names[4],boot=TRUE, boot.runs=1000)$Granger)
- 
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-```
-
-## 5.1 Gram-Negative infections and antibiotic use
-```{r}
-
-
-
-```
-
-## 5.1 Gram-Negative infections and antibiotic use
-```{r}
-
-
-
-```
-
-
+First we estimate VAR gram negatve bsi, ecoliccs and ecoli3gcr with each ABX
 
 ```{r}
-
-#---------------------------------------------------------------------
-### 1) Summarising all non-carbapenem abx as a single TS
-#----------------------------------------
-# Select variables
-#----------------------------------------
-noncarb_var<- ts_p2 %>% as_tibble() %>% dplyr::select(
-  gmneg_all_clinical, 
-  ecoli_esbl_all_clinical,
-  carbapenem,
-  noncarb) %>% ts()
-
-class(noncarb_var)
-
-
-cor(noncarb_var) #Printing the correlation matrix
-
-
-#----------------------------------------
-# Check for unit roots of individual TS before and after differencing to establish whether original TS are non-stationary (and therefore need either VEC or differencing)
-#----------------------------------------
-apply(noncarb_var, 2, adf.test) #Apply Unit Root tests to all TS
-noncarb_vard<- diffM(noncarb_var, d = 1) # Difference all vars
-apply(noncarb_vard, 2, adf.test) # check if single differencing makes stationary
-
-for (i in 1:ncol(X)){
-    print(colnames(X)[i]) #Prints the name of the time-series tested for stationarity to the R console.
-    options(warn=-1)
-    unitroot_trend<-adfTest(X[,i], type="c")@test$p.value #Checks for trend-stationarity of all series in the rolling window separately; if significant, means lack of trend in the series.
-    unitroot_const<-adfTest(X[,i], type="ct")
-    }
-
-
-
-#----------------------------------------
-# Plots of box-cox transformed and box-cox transformed with differencing TS
-#----------------------------------------
-autoplot(ts(noncarb_var)) +
-  ggtitle("Non-carbapenem, Carbapenem, Gram-Neg, and ESBL Time-Series")
-
-autoplot(ts(noncarb_vard)) +
-  ggtitle("Non-carbapenem, Carbapenem, Gram-Neg, and ESBL Time-Series (differenced)")
-
-#----------------------------------------
-# Determine the optimal lag (max) to include
-#----------------------------------------
-decompose <- function(data, y, ...){
-    y <- enquo(y)
-    dvar <- data %>% dplyr::pull(!!y) %>% as.ts()
-    tmpd <- data %>% model(STL(dvar ~ trend(window = 21) + 
-                                 season(window =13), 
-                               robust = TRUE)) %>%
-      components()
-}
-
-
-rem_gmneg<-decompose(tswide_clean, gmneg_all_clinical)[[6]]
-rem_esbl<-decompose(tswide_clean, ecoli_esbl_all_clinical)[[6]]
-rem_carba<-decompose(tswide_clean, carbapenem)[[6]]
-rem_noncarb<-decompose(tswide_clean, noncarb)[[6]]
-
-rems<- cbind(rem_gmneg, rem_esbl, rem_carba, rem_noncarb) %>% ts()
-
-VARselect(rems, type = "none", lag.max = 10) #highest lag order
-VARselect(noncarb_var, type = "trend", lag.max = 10) #highest lag order
-VARselect(noncarb_var, type = "const", lag.max = 10) #highest lag order
-
-#--------------------------------------------------
-# Run the Johansen co-integration test
-# K should equal the lag order suggested above
-#---------------------------------------------------
-cajo_noncarb_var<- ca.jo(type="eigen", noncarb_var, ecdet="trend", K=2,
-                         spec="transitory",season=12, dumvar=NULL)
- 
-summary(cajo_noncarb_var)
-cajorls(cajo_noncarb_var)
-
-#----------------------------------------
-# Run a VECM in 'tsDyn'
-# Notes: 
-# r   =  # of cointegrating relationships. 
-# lag = lag of diff in y (or lag of y-1)
-#----------------------------------------
-VECM_tsDyn_noncarb<- VECM(noncarb_var, lag=1, r = 1, estim = "ML", LRinclude = "none")
-
-
-summary(VECM_tsDyn_noncarb)
-##export to Latex
-toLatex(VECM_tsDyn_noncarb)
-toLatex(summary(VECM_tsDyn_noncarb))
-options("show.signif.stars"=FALSE)
-toLatex(summary(VECM_tsDyn_noncarb), parenthese="Pvalue")
-options("show.signif.stars"=TRUE)
-print(xtable(ECM_tsDyn_noncarb, type = "latex"))
-      
-#---------------------------------------------------------------------------
-# Run a VAR in levels accunting for cointegrating relations in 'vars' package
-# Notes: r= # of cointegrating relationships. lag= 
-#--------------------------------------------------------------------------
-vec2var_noncarb<- vec2var(cajo_noncarb_var, r=1)
-vec2var_noncarb
-
-
-#--------------------------------------------------------------------------
-# Forecast from VECM() in tsDyn
-#--------------------------------------------------------------------------
-# How many time-periods ahead to forecast
-
-nr_lev=nrow(noncarb_var)
-nfor=132-nr_lev
-
-VECM_pred_tsDyn <- predict(VECM_tsDyn_noncarb, n.ahead=nfor)
-
-# historical data + forecast data
-df <- rbind(noncarb_var, VECM_pred_tsDyn)
-dat<- seq(1,132,1)
-df <-as_tibble(cbind(dat,df)) 
-df %>% as_tsibble(index=dat)
-
-ggplot(df, aes(dat, carbapenem))+geom_line()+scale_y_continuous(limits=c(0,NA))
-ggplot(df, aes(dat, noncarb))+geom_line()+scale_y_continuous(limits=c(0,NA))
-ggplot(df, aes(dat, ecoli_esbl_all_clinical))+geom_line()+scale_y_continuous(limits=c(0,NA))
-```
-
-
-```{r}
-
-#----------------------------------------
-# Select variables
-#----------------------------------------
-
-tswide$cleani
-names<-c("clinical","swab")
-var<-eval_var(tswide_clean$crkp_hca_clinical, tswide_clean$crkp_co, names)
-var$impulse.response
+### VAR evaluation function
+library(lmtest)  # install.packages("lmtest")
+library(vars)    # install.packages("vars")
 
 
 # Defining function for VAR evaluation 2 variables y and series
 eval_var<-function(y, series, names){
 
-# Make series to be stationary
+  # Make series to be stationary
   
 dy=0; dseries=0
 
@@ -1311,7 +999,7 @@ assign(names[2],series)
 matrix<-cbind(y,series)
 colnames(matrix)<-names
 
-var.fit <- vars::VAR(matrix,lag.max = 7)
+var.fit <- vars::VAR(matrix,lag.max = 4)
 
   # Some test form var estimation
 serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
@@ -1349,18 +1037,18 @@ return(
 
 
 
-### VAR Gram Negative, ecoliccs ecoli3gcr( ts_p2[,18:20]) => abx( ts_p2[,5:9]) 
+### VAR Gram Negative, ecoliccs ecoli3gcr( Pre_icarba[,18:20]) => abx( Pre_icarba[,5:9]) 
 
 
 for (n in 18:20){
   
  for(j in 5:9){
-names<-colnames(ts_p2)[c(n,j)]
-var<-eval_var(y=ts_p2[,n], 
-              series=ts_p2[,j],
+names<-colnames(pre_icarba)[c(n,j)]
+var<-eval_var(y=pre_icarba[,n], 
+              series=pre_icarba[,j],
               names=names)
 
-#VAR.data<-data.frame(ts_p2[,n], ts_p2[,j])
+#VAR.data<-data.frame(pre_icarba[,n], pre_icarba[,j])
 #var<-VAR(VAR.data, ic="SC",lag.max = 12)
 #irf<-irf(var,n.ahead = 12,ortho=TRUE,cumulative=FALSE,boot=TRUE, ci=c(0.95), runs=50)
 #plot(irf)
@@ -1372,7 +1060,7 @@ var$causality$cause.series
 
 # optional: plot(var$var.decomp)
 
-assign(paste0(c("var",colnames(ts_p2)[n],colnames(ts_p2)[j]), sep=".", collapse = ""),
+assign(paste0(c("var",colnames(pre_icarba)[n],colnames(pre_icarba)[j]), sep=".", collapse = ""),
        var)
  }
 }
@@ -1383,16 +1071,15 @@ assign(paste0(c("var",colnames(ts_p2)[n],colnames(ts_p2)[j]), sep=".", collapse 
 Estimate VAR between swab and clinical
 ```{r}
 
-ts_post2 <- tswide_clean %>% filter(tswide_clean$int_targ_screen=="T")
-pathogen<-c("crkp")
-pop<-c("ho", "hca")
+pathogen<-c("crab","crkp","crpa")
+pop<-c("ho","cohca","conothca", "hca")
 
 
-for (n in 1:1){
+for (n in 1:3){
   
- for(j in 1:2){
+ for(j in 1:4){
 
-names.var<-c(paste("ts_post2$", paste(pathogen[n],pop[j],"swab",sep="_"), sep=""),paste("ts_post2$", paste(pathogen[n],pop[j],"clinical",sep="_"), sep=""))
+names.var<-c(paste("pre_icarba$", paste(pathogen[n],pop[j],"swab",sep="_"), sep=""),paste("pre_icarba$", paste(pathogen[n],pop[j],"clinical",sep="_"), sep=""))
 
 names<-c(paste(pathogen[n],pop[j],"swab",sep="_"),paste(pathogen[n],pop[j],"clinical",sep="_"))
 names0<-c("swab","clinical")   
@@ -1406,19 +1093,20 @@ plot(var$impulse.response) # It is necessary to put irf in one plot and common t
 
 var$causality$cause.y
 var$causality$cause.series
+
+# optional: plot(var$var.decomp)
+
+assign(paste0(c("var",names[2],names[1]), sep=".", collapse = ""),var)
  }
 }
 
-
-
 ```
-
 
 Interspecies competition
 
 ```{r}
 
-eval_var3<-function(cskp_all_any,cskp_all_any,cskp_all_any,names){
+eval_var3<-function(x,y,z,names){
 
 
   # Make series to be stationary
@@ -1489,7 +1177,7 @@ for( j in 1:4){
 
 names.var<-vector()
 for (n in 1:3){
-names.var<-c(names.var, paste("tswide_clean$", paste(pathogen[n],pop[j],"clinical",sep="_"), sep=""))
+names.var<-c(names.var, paste("pre_icarba$", paste(pathogen[n],pop[j],"clinical",sep="_"), sep=""))
 }
 
 x=eval( parse(text=names.var[1])) 
@@ -1523,14 +1211,14 @@ Interaction among sensitive and resistant strains
 
 pathogen0<-rbind(c("crab","crkp","crpa"),c("csab","cskp","cspa"))
 
-pop<-c("hca")
+pop<-c("ho","cohca","conothca", "hca")
 
 
 for (n in 1:3){
   
- for(j in 1:1){
+ for(j in 1:4){
 
-names.var<-c(paste("tswide_clean$", paste(pathogen0[1,n],pop[j],"clinical",sep="_"), sep=""),paste("tswide_clean$", paste(pathogen0[2,n],pop[j],"clinical",sep="_"), sep=""))
+names.var<-c(paste("pre_icarba$", paste(pathogen0[1,n],pop[j],"clinical",sep="_"), sep=""),paste("pre_icarba$", paste(pathogen0[2,n],pop[j],"clinical",sep="_"), sep=""))
 
 names<-c(paste(pathogen0[1,n],pop[j],"clinical",sep="_"),paste(pathogen0[2,n],pop[j],"clinical",sep="_"))
  
