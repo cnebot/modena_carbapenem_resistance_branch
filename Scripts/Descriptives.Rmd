@@ -213,8 +213,9 @@ sum_o_mean <- tslong %>% features(incidence, list(mean=mean,
 
 sumstats_allstudy<- left_join(sum_o, sum_o_mean, by=c("IR","site","pop","org"))
 
-sumstats_allstudy<- sumstats_allstudy  %>% mutate(bc=ifelse(grepl("_bc",site),1,0))
-
+sumstats_allstudy<- sumstats_allstudy  %>% mutate(
+  bc=ifelse(grepl("_bc",site),1,0),
+  outcome=paste0(IR,org,"_",pop,"_", site))
 
 clins<-c("bsi","clinical","other","resp","uti")
 
@@ -231,6 +232,17 @@ ggplot(sumstats_allstudy %>% filter(
         panel.grid.major.y=element_blank(),
         panel.grid.minor.y=element_blank())+
   scale_color_viridis_d(option="A", begin=0.2, end=0.8)
+
+
+library(broom)
+pcs <- sumstats_allstudy %>%
+  dplyr::select(!c(IR, pop, site, org, mean:bc, nsdiffs)) %>%
+  prcomp(scale = TRUE)
+  
+pcs %>%
+  ggplot(aes(x = .fittedPC1, y = .fittedPC2, col = Purpose)) +
+  geom_point() +
+  theme(aspect.ratio = 1)
 
 ```
 
@@ -275,7 +287,7 @@ kcpRS(datkp, RS_fun=runMean, RS_name="Mean",Kmax=5, wsize=15)
 kcpRS(datkp, RS_fun=runMean, RS_name="Mean", wsize = 25, nperm = 1000, Kmax = 10,
 alpha = 0.05, varTest = FALSE, ncpu = 1)
 
-look<- runMean(dat, wsize = 11)
+look<- runMean(datcorr, wsize = 11)
 look2<- runCorr(datcorr, wsize=11)
 date<- seq(as.Date("2008-11-1"), as.Date("2018-12-1"), by = "months")
 look<-cbind(date,look) 
@@ -290,20 +302,61 @@ looklong <- look %>% pivot_longer(cols=c(!date),
 looklong <- looklong %>% mutate(bugs=paste(IR,org,pop,site))
 
 
-ggplot(looklong %>% filter(site=="bsi"), aes(date, org, color=measure, fill=measure))+geom_tile()+
+ggplot(looklong, aes(date, org, color=measure, fill=measure))+geom_tile()+
   scale_fill_viridis_c(option="A")+
   scale_color_viridis_c(option="A")
 
 ### R beast
+# univariate
+#CRKp
+crkp<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crkp_hca_clinical)
+crkp<-ts(crkp, start=c(2008,1), frequency=12)
+crkp_cp = beast123(crkp,metadata=metadata, season='none')
 
+#CRPa
+crpa<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crpa_hca_clinical)
+crpa<-ts(crpa, start=c(2008,1), frequency=12)
+crpa_cp = beast123(crpa,metadata=metadata, season='none')
+
+#CRAb
+crab<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crab_hca_clinical)
+crab<-ts(crab, start=c(2008,1), frequency=12)
+crab_cp = beast123(crab,metadata=metadata, season='none')
+
+plot(crkp_cp)
+plot(crpa_cp)
+plot(crab_cp)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# multivariate
 datcorr<- tswide_clean %>%
   dplyr::select(date, crab_hca_clinical,crpa_hca_clinical, crkp_hca_clinical)
 
-beast123(y=datcorr,
-         metadata=list(freq=12, whichDimIsTime=2),
-         prior,
-         mcmc=tslong_p2extra
 
+metadata<- list(freq=12, deltaTime=1, 
+                       whichDimIsTime=2,
+                       startTime=c(2008,1),
+                       isRegularOrdered=T)
+prior<- list(seasonMinKnotNum=1, seasonMaxKnotNum=3,
+                    trendMinOrder=1, trendMaxOrder=4,
+                     trendMinOrder=1, trendMaxOrder=3,
+                    trendMinSepDist=6,
+                    trendMinKnotNum=1, trendMaxKnotNum=3)
+extra<- list(dumpInputData=T,whichOutputDimIsTime=2)
+
+o = beast123(datcorr,metadata=metadata,prior=prior, extra=extra, season='dummy')
+
+o = beast123(Yellowstone,metadata,prior,extra, season='harmonic')
+plot(o)
+
+crkp<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crkp_hca_clinical)
+
+crkp<-ts(crkp, start=c(2008,1), frequency=12)
 ```
 
 ## 3.2 Comparison of seasonality
@@ -380,13 +433,14 @@ seasonality_inf_cs<- ggplot(
 seasonality_inf_cs
 ```
 
+
 ## 3.3 Plot of TS 
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 decompose <- function(data, y, ...){
     y <- enquo(y)
     dvar <- data %>% dplyr::pull(!!y) %>% as.ts()
-    tmpd <- data %>% model(STL(dvar ~ trend(window = 21) + 
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 13) + 
                                  season(window =13), 
                                robust = TRUE)) %>%
       components()
