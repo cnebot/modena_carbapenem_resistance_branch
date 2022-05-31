@@ -88,8 +88,9 @@ source("smooth_diff_function.R") # Gavin Simpson's function for deriving smooth 
 main <- read_excel("../Data/raw data/modena_final_2008_2018.xlsx")
 
 # Add date variable
-main$date <- yearmonth(seq(as.Date("2008-01-01"), as.Date("2018-12-31"), 
-                      by = "1 month"))
+main$date <- yearmonth(seq(as.Date("2008-01-01"),
+                           as.Date("2018-12-31"), 
+                           by = "1 month"))
 
 # Add pc_variables
 
@@ -100,34 +101,33 @@ tswide <- main %>% mutate(
   across(abhr: rectalswab, ~./obds*1000))  %>% 
   as_tsibble(index = date)
 
-#  Select variables to evaluate for outliers (abx, obds, bed-occupancy, IPC)
+#  Select variables to evaluate for outliers (abx, obds, bed-occupancy, IPC, non-target GN pathogen incidences
 wide_clean <- tswide %>% as_tibble %>% 
-  dplyr::select(date, obds, bedocc,abhr:all_monitor_abx)
+  dplyr::select(date, obds, bedocc,abhr:all_monitor_abx,gmneg_all_clinical:ecoli_esbl_all_bsi)
 
 # Apply outlier detection /cleaning function and replace original variables
 newabx.matrix<-rep(0,132) # creates empty matrix
+
 for(i in 1:length(wide_clean[1,])){
 abx<- wide_clean[,i]
 newabx<-OutlierTreatment2(abx,freq=12,start.date=c(2008,1), only.clean=TRUE)
 newabx.matrix <-cbind(newabx.matrix, newabx)
 }
+
 newabx.matrix<-newabx.matrix[,-1]
 
 colnames(newabx.matrix)<-c(paste0(colnames(wide_clean)))
 newabx.matrix<- newabx.matrix[,!colnames(newabx.matrix) %in% 'date']
 
-tmp <-tswide %>% dplyr::select(!c(date, obds,bedocc,abhr:all_monitor_abx))
+tmp <-tswide %>% dplyr::select(!c(date, obds, bedocc,abhr:all_monitor_abx,gmneg_all_clinical:ecoli_esbl_all_bsi))
 
 tswide_clean<-cbind(newabx.matrix,as.data.frame(tmp)) %>% as_tsibble(index=date)
 
-tswide_clean <- tswide_clean %>% mutate(
-  noncarb = fq+`3gc`+pseudo_3gc+other_monitor_abx,
-  ceph = `3gc`)
+rm(tmp, newab.matrix, date, abx, tswide, wide_clean) # Remove temporary data
 
-# Remove temporary data
-rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
-
-# Create percentage 
+# generate new vars after box-cox transformation
+tswide_clean <- tswide_clean %>% mutate(across(
+  c(abhr:ecoli_esbl_all_bsi, allab_all_clinical:crpa_cohca_swab, cephs,noncarb), box_cox_vec,.names="{.col}_bc"))
 
 # label data
 tswide_clean<- tswide_clean %>%
@@ -160,19 +160,30 @@ ts_i3 <- tswide_clean %>% filter(!phase =="4")
 
 #### 2) Generate "long" format dataset for microbial data ########
 # for incidences
-tslong <- tswide_clean %>% 
-  dplyr::select(!c(obds:year,
-                   int_carb_asp:ecoli_esbl_all_bsi,noncarb,ceph)) %>%
+tsw <-tswide_clean %>% dplyr::select(!contains("_bc"))
+tsw_bc <-tswide_clean %>% dplyr::select(contains("_bc"), date,phase)
+
+tslong <- tsw %>% 
+  dplyr::select(date, phase,
+                   allab_all_clinical:crpa_cohca_swab) %>%
   pivot_longer(
-  cols = csab_all_any:crpa_cohca_swab,
+  cols = allab_all_clinical:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
+  names_pattern = "(cr|cs|all)(ab|kp|pa)_(.*)_(.*)",
   values_to="incidence") %>% filter(pop!="NA")
 
-tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
+tslong_bc <- tsw_bc %>% 
+  dplyr::select(date, phase,
+                   allab_all_clinical_bc:crpa_cohca_swab_bc) %>%
+  pivot_longer(
+  cols = allab_all_clinical_bc:crpa_cohca_swab_bc,
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs|all)(ab|kp|pa)_(.*)_(.*_bc)",
+  values_to="incidence") %>% filter(pop!="NA")
 
-tslong<- tslong %>% group_by(bugs) %>%
-  mutate (incidence_bc = box_cox_vec(incidence,silent=T))
+tslong<-dplyr::bind_rows(tslong, tslong_bc)
+
+tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
 tslong$phase <-as_factor(tslong$phase)
 tslong_p1 <- tslong %>% filter(phase=="1")
@@ -180,45 +191,175 @@ tslong_p2 <- tslong %>% filter(phase=="2")
 tslong_p3 <- tslong %>% filter(phase=="3")
 tslong_p4 <- tslong %>% filter(phase=="4")
 
-# for percentages
-tslong_pc <- main %>%  as_tsibble(index=date) %>%
-  dplyr::select(c(date,phase,csab_all_any:crpa_cohca_swab)) %>%
-  pivot_longer(
-  cols = csab_all_any:crpa_cohca_swab,
-  names_to = c("IR", "org", "pop", "site"),
-  names_pattern = "(cr|cs)(ab|kp|pa)_(.*)_(.*)",
-  values_to="nums") %>% 
-  filter(pop!="NA") 
-
-tslong_pc<- tslong_pc %>% 
-  mutate (bugs = paste(org,pop,site)) %>%
-  pivot_wider(names_from=IR, values_from=nums) %>%
-  mutate(pc_cro=cr/(cr+cs))
 
 
-tslong_pc$phase <-as_factor(tslong_pc$phase)
-tslong_pc_p1 <- tslong_pc %>% filter(phase=="1")
-tslong_pc_p2 <- tslong_pc %>% filter(phase=="2")
-tslong_pc_p3 <- tslong_pc %>% filter(phase=="3")
-tslong_pc_p4 <- tslong_pc %>% filter(phase=="4")
+tslong<- tslong %>% mutate(bc=ifelse(grepl("_bc",site),1,0))
 
 #Create nested long datasets
 tslong_cro_nested <- tslong %>% group_by(bugs,IR,org,pop,site) %>% nest() 
-
-tslong_pc_cro_nested <- tslong_pc %>% 
-  dplyr::filter(site=="clinical" |site=="swab") %>% 
-  group_by(bugs,org,pop,site) %>% 
-  nest() 
 
 ```
 
 
 # 2. Descriptives table by period
 
+```{r message=FALSE, warning=FALSE, results='hide'}
 
 # 3. Description of CRO and CSO time-series
+sum_o <- tslong %>% features(incidence, 
+                    feature_set(pkgs = "feasts")) %>% as_tibble()
+sum_o_mean <- tslong %>% features(incidence, list(mean=mean,
+                                  quantile)) %>% as_tibble()
 
-## 3.1 Comparison of seasonality
+sumstats_allstudy<- left_join(sum_o, sum_o_mean, by=c("IR","site","pop","org"))
+
+sumstats_allstudy<- sumstats_allstudy  %>% mutate(
+  bc=ifelse(grepl("_bc",site),1,0),
+  outcome=paste0(IR,org,"_",pop,"_", site))
+
+clins<-c("bsi","clinical","other","resp","uti")
+
+ggplot(sumstats_allstudy %>% filter(
+  site %in% clins & pop=="hca"), 
+  aes(seasonal_peak_year, seasonal_strength_year, 
+      color=site, size=mean))+
+  geom_point(alpha=0.5)+facet_grid(org~IR)+
+  scale_y_continuous(name="Strength of seasonality",
+                     limits=c(0,0.7))+
+  scale_x_continuous(name="Month of seasonal peak",
+                     breaks=seq(0,12,3))+
+  theme(panel.grid.minor.x=element_blank(),
+        panel.grid.major.y=element_blank(),
+        panel.grid.minor.y=element_blank())+
+  scale_color_viridis_d(option="A", begin=0.2, end=0.8)
+
+
+library(broom)
+pcs <- sumstats_allstudy %>%
+  dplyr::select(!c(IR, pop, site, org, mean:bc, nsdiffs)) %>%
+  prcomp(scale = TRUE)
+  
+pcs %>%
+  ggplot(aes(x = .fittedPC1, y = .fittedPC2, col = Purpose)) +
+  geom_point() +
+  theme(aspect.ratio = 1)
+
+```
+
+# 3. Descriptives of trends
+
+## 3.1 Change point analysis
+```{r message=FALSE, warning=FALSE, results='hide'}
+datcorr<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crab_hca_clinical,crpa_hca_clinical, crkp_hca_clinical)
+
+datab<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crab_hca_clinical,crab_hca_bsi,
+                crab_hca_uti, crab_hca_resp,crab_hca_other)
+
+datpa<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crpa_hca_clinical,crpa_hca_bsi,
+                crpa_hca_uti, crpa_hca_resp,crpa_hca_other)
+
+datkp<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crkp_hca_clinical,crkp_hca_bsi,
+                crkp_hca_uti, crkp_hca_resp,crkp_hca_other)
+
+kcpRS_workflow(datcorr, RS_funs = c("runMean"), wsize = 3, K=10)
+kcpRS_workflow(datkp, RS_funs = c("runMean"), wsize = 5, K=10)
+kcpRS_workflow(datpa, RS_funs = c("runMean"), wsize = 5, K=10)
+kcpRS_workflow(datab, RS_funs = c("runMean"), wsize = 5, K=10)  
+kcp<- function(x, n){
+List <- list()
+for (i in n:1) {
+l<- kcpRS_workflow(x, RS_funs = c("runMean"), wsize = n)
+window <-rep(l$kcpMean$wsize, length(l$kcpMean$changePoints))
+cp<- l$kcpMean$changePoints
+lowcp<-round(cp-(window/2))
+highcp<-round(cp+(window/2))
+out<- cbind(window, cp, lowcp, highcp) %>% as.data.frame()
+List[[length(List) + 1]]<-out
+}
+}
+
+
+kcpRS(datkp, RS_fun=runMean, RS_name="Mean",Kmax=5, wsize=15)
+kcpRS(datkp, RS_fun=runMean, RS_name="Mean", wsize = 25, nperm = 1000, Kmax = 10,
+alpha = 0.05, varTest = FALSE, ncpu = 1)
+
+look<- runMean(datcorr, wsize = 11)
+look2<- runCorr(datcorr, wsize=11)
+date<- seq(as.Date("2008-11-1"), as.Date("2018-12-1"), by = "months")
+look<-cbind(date,look) 
+
+
+
+looklong <- look %>% pivot_longer(cols=c(!date),
+  names_to = c("IR", "org", "pop", "site"),
+  names_pattern = "(cr|cs|all)(ab|kp|pa)_(.*)_(.*)",
+  values_to="measure") %>% filter(pop!="NA")
+
+looklong <- looklong %>% mutate(bugs=paste(IR,org,pop,site))
+
+
+ggplot(looklong, aes(date, org, color=measure, fill=measure))+geom_tile()+
+  scale_fill_viridis_c(option="A")+
+  scale_color_viridis_c(option="A")
+
+### R beast
+# univariate
+#CRKp
+crkp<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crkp_hca_clinical)
+crkp<-ts(crkp, start=c(2008,1), frequency=12)
+crkp_cp = beast123(crkp,metadata=metadata, season='none')
+
+#CRPa
+crpa<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crpa_hca_clinical)
+crpa<-ts(crpa, start=c(2008,1), frequency=12)
+crpa_cp = beast123(crpa,metadata=metadata, season='none')
+
+#CRAb
+crab<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crab_hca_clinical)
+crab<-ts(crab, start=c(2008,1), frequency=12)
+crab_cp = beast123(crab,metadata=metadata, season='none')
+
+plot(crkp_cp)
+plot(crpa_cp)
+plot(crab_cp)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# multivariate
+datcorr<- tswide_clean %>%
+  dplyr::select(date, crab_hca_clinical,crpa_hca_clinical, crkp_hca_clinical)
+
+
+metadata<- list(freq=12, deltaTime=1, 
+                       whichDimIsTime=2,
+                       startTime=c(2008,1),
+                       isRegularOrdered=T)
+prior<- list(seasonMinKnotNum=1, seasonMaxKnotNum=3,
+                    trendMinOrder=1, trendMaxOrder=4,
+                     trendMinOrder=1, trendMaxOrder=3,
+                    trendMinSepDist=6,
+                    trendMinKnotNum=1, trendMaxKnotNum=3)
+extra<- list(dumpInputData=T,whichOutputDimIsTime=2)
+
+o = beast123(datcorr,metadata=metadata,prior=prior, extra=extra, season='dummy')
+
+o = beast123(Yellowstone,metadata,prior,extra, season='harmonic')
+plot(o)
+
+crkp<- tswide_clean %>% as_tibble()  %>% 
+  dplyr::select(crkp_hca_clinical)
+
+crkp<-ts(crkp, start=c(2008,1), frequency=12)
+```
+
+## 3.2 Comparison of seasonality
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 ## Look at seasonality
@@ -292,13 +433,14 @@ seasonality_inf_cs<- ggplot(
 seasonality_inf_cs
 ```
 
-## 3.2 Plot of TS 
+
+## 3.3 Plot of TS 
 ```{r message=FALSE, warning=FALSE, results='hide'}
 
 decompose <- function(data, y, ...){
     y <- enquo(y)
     dvar <- data %>% dplyr::pull(!!y) %>% as.ts()
-    tmpd <- data %>% model(STL(dvar ~ trend(window = 21) + 
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 13) + 
                                  season(window =13), 
                                robust = TRUE)) %>%
       components()
@@ -307,7 +449,7 @@ decompose <- function(data, y, ...){
 
 # TS decomposition for incidence
 ts_decomp <- tslong_cro_nested %>% 
-    mutate(decs = map(data, decompose, y = incidence_bc)) %>%
+    mutate(decs = map(data, decompose, y = incidence)) %>%
     dplyr::select(-data) %>% unnest(decs)
 
 ts_decomp$inf <- if_else(ts_decomp$site=="swab","swab","clinical")

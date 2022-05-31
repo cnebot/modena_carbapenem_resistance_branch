@@ -77,9 +77,13 @@ library(vars) # VARS/vECM model functions
 library(urca) # Johansen and related cointegration tests
 library(MTS)
 library(timetk)
+library(vars)
 
-source("cochrane_plot_theme.R") # imports a custom ggplot theme defined in other script
-source("OutlierTreatment2.R") # imports custom function for detecting extreme outliers and replacing.
+#### Source custom functions from separate scripts
+source("cochrane_plot_theme.R") # ggplot theme
+source("OutlierTreatment2.R") # outlier detection and time-series cleaning
+source("eval_var.R") # VAR model fitting
+source("stability.R") # Stability of VAR models (adapted from Toth et al 2019)
 ```
 
 ## 1.3 Load data and process
@@ -89,7 +93,12 @@ source("OutlierTreatment2.R") # imports custom function for detecting extreme ou
 # Read in the main data 
 main <- read_excel("../Data/raw data/modena_final_2008_2018.xlsx")
 
-date <- yearmonth(seq(as.Date("2008-01-01"), as.Date("2018-12-31"), by = "1 month")) %>% as_tibble() %>% rename(date="value")
+date <- yearmonth(seq(as.Date("2008-01-01"),
+                      as.Date("2018-12-31"), 
+                      by = "1 month")) %>% 
+  as_tibble() %>% 
+  rename(date="value")
+
 
 main <- cbind(date,main) %>% dplyr::select(!c(study_m, Month))
 
@@ -129,30 +138,236 @@ rm(tmp, newab.matrix, date, abx, tswide, wide_clean)
 tswide_clean <- tswide_clean %>% mutate(across(
   c(abhr:ecoli_esbl_all_bsi, allab_all_clinical:crpa_cohca_swab, cephs,noncarb), box_cox_vec,.names="{.col}_bc"))
 
+tswide_clean <- tswide_clean %>% mutate(
+  cro=crkp_all_clinical+crpa_all_clinical+crab_all_clinical,
+  cso=cskp_all_clinical+cspa_all_clinical+csab_all_clinical,
+  crkp_coimport_w = crkp_cohca_any / (crkp_cohca_any+crkp_conothca_any),
+  crkp_coimport_tf = (crkp_cohca_any*crkp_coimport_w) +
+    (crkp_cohca_any*(1-crkp_coimport_w)),
+    crab_coimport_w = crab_cohca_any / (crab_cohca_any+crab_conothca_any),
+  crab_coimport_tf = (crab_cohca_any*crab_coimport_w) +
+    (crab_cohca_any*(1-crab_coimport_w)),
+    crpa_coimport_w = crpa_cohca_any / (crpa_cohca_any+crpa_conothca_any),
+  crpa_coimport_tf = (crpa_cohca_any*crpa_coimport_w) +
+    (crpa_cohca_any*(1-crpa_coimport_w)))
+  
 
 # Derive pre-intervention time-series
-ts_p1 <- tswide_clean %>% filter (phase <=1)
-ts_p2<- tswide_clean %>% filter (phase <=2)
-ts_p3 <- tswide_clean %>% filter (phase <=3)
+ts_p1 <- tswide_clean %>% dplyr::filter (phase <=1)
+ts_p2<- tswide_clean %>% dplyr:: filter (phase <=2)
+ts_p3 <- tswide_clean %>% dplyr::filter (phase <=3)
+
+ts_post1 <- tswide_clean %>% dplyr::filter(phase != "1")
+ts_post2 <- tswide_clean %>% dplyr::filter(phase == "3"| phase =="4")
 
 # Generate long-format data
 tslong <- tswide_clean %>% 
-  dplyr::select(c(date, phase,
+  dplyr::select(c(date, phase, 
                   allab_all_clinical:crpa_cohca_swab)) %>%
   pivot_longer(
   cols = allab_all_clinical:crpa_cohca_swab,
   names_to = c("IR", "org", "pop", "site"),
   names_pattern = "(cr|cs|all)(ab|kp|pa)_(.*)_(.*)",
-  values_to="incidence") %>% filter(pop!="NA")
+  values_to="incidence") %>% dplyr::filter(pop!="NA")
 
 tslong<- tslong %>% mutate (bugs = paste(IR,org,pop,site))
 
 
 tslong$phase <-as_factor(tslong$phase)
-tslong_p1 <- tslong %>% filter(phase=="1")
-tslong_p2 <- tslong %>% filter(phase=="2")
-tslong_p3 <- tslong %>% filter(phase=="3")
+tslong_p1 <- tslong %>% dplyr::filter(phase=="1")
+tslong_p2 <- tslong %>% dplyr::filter(phase=="2")
+tslong_p3 <- tslong %>% dplyr::filter(phase=="3")
 tslong_p4 <- tslong %>% filter(phase=="4")
+
+
+# Generate long-format data for abx
+tslongabx <- tswide_clean %>% 
+  dplyr::select(c(date, phase, 
+                  gmneg_all_clinical, 
+                  ecoli_esbl_all_clinical, 
+                  ecoli_esbl_all_bsi,
+                  gmneg_all_bsi,
+                  cro,cso,
+                  carbapenem:all_monitor_abx)) %>%
+  pivot_longer(
+  cols = carbapenem:all_monitor_abx,
+  names_to = "antibiotic",
+  values_to="ddd")
+
+tslongabx <-tslongabx %>%
+    group_by(antibiotic) %>%
+    tk_augment_differences(
+      .value=contains(c("gmneg_all_clinical",
+                        "ecoli_esbl_all_clinical",
+                        "cro","cso")),.lags = 1)
+```
+
+## 1.4 Back-casting colonisations
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+  x <- (ts_post1$crkp_cohca_any_bc)
+    h <- 75
+    f <- frequency(x)
+    # Reverse time
+    revx <- ts(rev(x), frequency=f)
+    # Forecast
+    fc <- forecast::forecast(auto.arima(revx), h)
+    plot(fc)
+
+```
+#2. Examining 
+## 2.1 GN infections and abx
+### 2.1.1 GN and Carbapenem
+```{r}
+# 
+decompose <- function(data, y, ...){
+    y <- enquo(y)
+    dvar <- data %>% dplyr::pull(!!y) %>% as.ts()
+    tmpd <- data %>% model(STL(dvar ~ trend(window = 7) + 
+                                 season(window =13), 
+                               robust = TRUE)) %>%
+      components()
+    data <-dplyr::bind_cols(data,tmpd[,3:6]) %>% as_tibble()
+}
+
+tslongabx_nest <- tslongabx %>% group_by(antibiotic)%>% nest()
+
+
+# TS decomposition for antibiotics
+ts_decompabx <- tslongabx_nest %>% 
+    mutate(decs = map(data, decompose, y = ddd)) %>%
+    dplyr::select(-data) %>% unnest(decs)
+
+ts_decompabx <-ts_decompabx %>% mutate(time = ym(as.character(date)))
+
+ts_decabx_long<- ts_decompabx %>% pivot_longer(cols=c("trend","season_year","remainder"),names_to="component")
+
+ts_decabx_long <- ts_decabx_long %>% as_ features(lambda=lambda_guerrero)
+
+
+
+
+abx_trend <- ggplot(ts_decabx_long %>% dplyr::filter(component=="trend"),
+       aes(time, value, group=antibiotic, color=antibiotic))+
+  geom_line()+
+  facet_grid(.~antibiotic, scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="none")
+
+
+abx_season <- ggplot(ts_decabx_long %>% dplyr::filter(component=="season_year"),
+       aes(time, value, group=antibiotic, color=antibiotic))+
+  geom_line()+
+  facet_grid(.~antibiotic, scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="none")+
+  theme( strip.background = element_blank(),
+         strip.text.x = element_blank(),
+         axis.title.x=element_blank (), 
+         axis.text.x=element_blank ())
+
+
+
+abx_remainder <- ggplot(ts_decabx_long %>% dplyr::filter(component=="remainder"),
+       aes(time, value, group=antibiotic, color=antibiotic))+
+  geom_line()+
+  facet_grid(.~antibiotic, scales="free_y")+
+  scale_color_viridis_d(option="A",begin=0.2, end=0.8)+
+  theme_pnaat()+
+  theme(panel.grid=element_blank())+
+  scale_x_date("Year", date_breaks="1 year", date_labels = "%Y")+
+  scale_y_continuous("All clinical infections (cases per 10 000 OBDs)")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[57]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[73]),
+             linetype=2, color="grey")+
+  geom_vline(xintercept=as.numeric(ts_decomp$time[81]),
+               linetype=2, color="grey")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="none")+
+  theme( strip.background = element_blank(),
+         strip.text.x = element_blank(),
+         axis.title.x=element_blank (), 
+         axis.text.x=element_blank ())
+
+layout<-"
+A
+A
+A
+A
+B
+C"
+
+
+abx_trend+abx_season+abx_remainder+plot_layout(guides="collect", design=layout)
+
+tslongabx %>% group_by(antibiotic) %>% as_tsibble(index=date)
+
+outliers <- ts_decompabx  %>%
+  dplyr::filter(remainder < quantile(remainder, 0.25) -
+           3*IQR(remainder) |
+  remainder > quantile(remainder, 0.75) + 3*IQR(remainder))
+outliers
+
+
+ts_decompabx <-ts_decompabx %>% mutate(
+  time = ym(as.character(date)),
+  seasdj=ddd-season_year)
+
+
+ts_decompabx$seasadj <- ts_decompabx$ddd-ts_decompabx$season_year
+tsdecabx1 <- ts_decompabx %>% ungroup() %>% as_tibble() %>% dplyr::select(-date)
+
+set1abx<-c("fq","pseudo_3gc","cephs","carbapenems")
+set2abx<- c("all_monitor_abx","noncarb","other_monitor_abx")
+ggplot(ts_decompabx %>% 
+         dplyr::filter(antibiotic ==set2abx), 
+         aes(date, y=ddd, color=antibiotic))+
+  geom_line(alpha=0.5)+
+  geom_line(aes(y=trend))+
+  scale_y_continuous(limits=c(0,NA))
+
+va<-c("carbapenem", "ecoli_esbl_all_clinical")
+sumstats_allstudy %>% dplyr::filter(outcome==va) %>% 
+  dplyr::select(kpss_pvalue, pp_pvalue, ndiffs,nsdiffs)
+
+X<-ts_p2 %>% as_tibble() %>% dplyr::select(va) %>% as.matrix()
+
+ts_p2 %>% CCF(difference(carbapenem), difference(ecoli_esbl_all_clinical)) %>% autoplot()
+
+eval_var2(X,ir_CUM=F, force.degree=NULL)
+
+gmneg_allabx<- tswide_clean %>% as_tibble() %>%
+  dplyr::select(import_crkp, crkp_all_clinical) %>% as.matrix()
+gmneg_allabx_stability <- var_stability(gmneg_allabx, periods=12)
+eval_var2()
+```
+
+# 2. Antibiotic time-series
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
 
 ```
 
@@ -224,7 +439,7 @@ arima_crkp_hca_bc <- tswide_clean %>% model(
   arima_crkp_hca_bc_111 = ARIMA(box_cox(crkp_hca_clinical ~ pdq(1,1,1)),
   arima_crkp_hca_bc_011 = ARIMA(crkp_hca_clinical_bc ~ pdq(0,1,1)),
   arima_crkp_hca_bc_101 = ARIMA(crkp_hca_clinical_bc ~ pdq(1,0,1)),
-  stepwise_crkp_hca  =ARIMA(crkp_hca_clinical_bc))
+  stepwise_crkp_hca  =ARIMA(crkp_hca_clinical_bc)))
 
 glance(arima_crkp_hca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
@@ -336,7 +551,7 @@ arima_crpa_hca %>% dplyr::select(stepwise_crpa_hca) %>% gg_tsresiduals()
 
 #### Check portmanteau tests of best fit option
 augment(arima_crpa_hca) %>% 
-  filter(.model=='arima_crpa_hca_011') %>%
+  filter(.model=='arima_crpa_hca_111') %>%
   features(.innov, ljung_box, lag = 10, dof = 3)  # portmanteau test on best manual
 ```
 
@@ -486,7 +701,6 @@ augment(arima_crab_conothca_bc) %>%
 #### Plot data, ACF, PACF
 
 tswide_clean <- tswide_clean %>% as_tsibble(index=date)
-
 tswide_clean %>% gg_tsdisplay(crpa_conothca_clinical, "partial")
 
 
@@ -494,12 +708,6 @@ tswide_clean %>% gg_tsdisplay(crpa_conothca_clinical, "partial")
 tswide_clean %>% features(crpa_conothca_clinical, unitroot_kpss)
 tswide_clean %>% features(crpa_conothca_clinical, unitroot_ndiffs) 
 tswide_clean %>% features(crpa_conothca_clinical, unitroot_nsdiffs,.period=12) 
-
-#### Examine need for a Box-Cox data transformation to reduce heteroskedasticity (i.e variability in the variance of the time-series)
-lambda<-guerrero(tswide_clean$crpa_conothca_clinical, .period=12L)
-
-#### create new transformed variable
-tswide_clean$crpa_conothca_clinical_bc <- (((tswide_clean$crpa_conothca_clinical)^lambda)-1)/lambda
 
 ####  Plot the transformed variable, ACF, PACF
 tswide_clean %>% gg_tsdisplay(crpa_conothca_clinical_bc, "partial")
@@ -513,13 +721,17 @@ tswide_clean %>% gg_tsdisplay(difference(crpa_conothca_clinical_bc), "partial")
 
 # fit best manual and auto ARIMA with default approach for NON-TRANSFORMED data
 arima_crpa_conothca <- tswide_clean %>% model(
+  arima_crpa_conothca_011 = ARIMA(
+    crpa_conothca_clinical ~ pdq(0,1,1)),
   arima_crpa_conothca_101 = ARIMA(
     crpa_conothca_clinical ~ pdq(1,0,1)),
   stepwise_crpa_conothca = ARIMA(
     crpa_conothca_clinical)) 
 
 glance(arima_crpa_conothca) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+arima_crpa_conothca  %>% dplyr::select(arima_crpa_conothca_011) %>% gg_tsresiduals() # compare models
 arima_crpa_conothca  %>% dplyr::select(arima_crpa_conothca_101) %>% gg_tsresiduals() # compare models
+
 arima_crpa_conothca %>% dplyr::select(stepwise_crpa_conothca) %>% gg_tsresiduals() # compare models
 
 
@@ -537,11 +749,12 @@ arima_crpa_conothca_bc <- tswide_clean %>% model(
 glance(arima_crpa_conothca_bc) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
 
 arima_crpa_conothca_bc  %>% dplyr::select(arima_crpa_conothca_bc_011) %>% gg_tsresiduals() # compare models
+arima_crpa_conothca_bc  %>% dplyr::select(arima_crpa_conothca_bc_101) %>% gg_tsresiduals() # compare models
 arima_crpa_conothca_bc %>% dplyr::select(stepwise_crpa_conothca_bc) %>% gg_tsresiduals() # compare models
 
 #### Check portmanteau tests of best fit option
 augment(arima_crpa_conothca_bc) %>% 
-  filter(.model=='arima_crpa_conothca_bc_011') %>%
+  filter(.model=='arima_crpa_conothca_bc_101') %>%
   features(.innov, ljung_box, lag = 10, dof = 3)  #portmanteau test on best manual
 
 
@@ -550,7 +763,80 @@ augment(arima_crpa_conothca_bc) %>%
 
 
 ## 3.3 Antibiotic and IPC time series
+```{r message=FALSE, warning=FALSE, include=TRUE}
 
+tslongabx<-tslongabx %>% as_tsibble(index=date)
+tslongabx %>%
+    group_by(antibiotic) %>%
+    plot_acf_diagnostics(.date_var= date,
+                         .value= difference(ddd),
+                         .lags=18, 
+                         .interactive = F,
+                         .line_alpha=0.5,
+                         .line_color="steelblue",
+                         .white_noise_line_color="red",
+                         .white_noise_line_type=1,
+                         .point_color="steelblue")
+
+# Plot the univariate ACFs, PACFs
+tslongabx %>% dplyr::filter(antibiotic=="carbapenem" &
+                              c(phase==1 |phase==2) %>%
+  dplyr::filter(phase==1 | phase==2) ) %>%
+    group_by(antibiotic) %>%
+    plot_acf_diagnostics(.date_var= date,
+                         .value= difference(ddd),
+                         .ccf_vars=c(
+                           "ecoli_esbl_all_clinical",
+                           "gmneg_all_clinical","cso","cro"),
+                         .show_ccf_vars_only = T,
+                         .lags=18, 
+                         .interactive = F,
+                         .line_alpha=0.5,
+                         .line_color="steelblue",
+                         .white_noise_line_color="red",
+                         .white_noise_line_type=1,
+                         .point_color="steelblue")
+
+tslongabx  %>% dplyr::filter(
+  antibiotic==c("fq","cephs","other_monitor_abx","noncarb",
+                "pseudo_3gc","all_monitor_abx")) %>%
+                               filter_index(~"2014-09") %>%
+    group_by(antibiotic) %>%
+    plot_acf_diagnostics(.date_var= date,
+                         .value= difference(ddd),
+                         .ccf_vars=c(
+                           "ecoli_esbl_all_clinical",
+                           "gmneg_all_clinical",
+                           "cso","cro"),
+                         .show_ccf_vars_only = T,
+                         .lags=14, 
+                         .interactive = F,
+                         .line_alpha=0.5,
+                         .line_color="steelblue",
+                         .white_noise_line_color="red",
+                         .white_noise_line_type=1,
+                         .point_color="steelblue")
+
+tslongabx  %>% dplyr::filter(
+  antibiotic==c("fq","cephs","other_monitor_abx","noncarb",
+                "pseudo_3gc","all_monitor_abx")) %>%
+                               filter_index(~"2014-09") %>%
+    group_by(antibiotic) %>%
+    plot_acf_diagnostics(.date_var= date,
+                         .value= difference(ddd),
+                         .ccf_vars=c(
+                        "ecoli_esbl_all_clinical_lag1_diff1",
+                           "gmneg_all_clinical_lag1_diff1",
+                           "cso_lag1_diff1","cro_lag1_diff1"),
+                         .show_ccf_vars_only = T,
+                         .lags=14, 
+                         .interactive = F,
+                         .line_alpha=0.5,
+                         .line_color="steelblue",
+                         .white_noise_line_color="red",
+                         .white_noise_line_type=1,
+                         .point_color="steelblue")
+```
 
 ### 3.2.6 non-HCA-CRPa clinical (*crpa_conothca_clinical*)
 ```{r message=FALSE, warning=FALSE, include=TRUE}
@@ -657,11 +943,13 @@ In this section we look at temporal correlations between variables hypothesised 
 ### 4.1.2 All monitor abx
 ```{r message=FALSE, warning=FALSE, include=TRUE}
 
+vars<- c("gmneg_all_clinical","noncarb","carbapenem","ecoli_esbl_all_clinical")
+data <- ts_p3
+
 #----------------------------------------
 # Select variables
-X = ts_p2
-vars<- c("date", "cskp_all_clinical", "gmneg_all_clinical", "all_monitor_abx",
-  "ecoli_esbl_all_clinical")
+arimax <- function(data, vars){
+X <- data
 
 X <- X %>% as_tsibble() %>% dplyr::select(vars)
 
@@ -691,7 +979,7 @@ tsdplot <- ggplot(Xlongd, aes(date,
   theme_pnaat()+
   theme(panel.grid=element_blank())
 
-tsplot+tsdplot+plot_layout(guides="collect")
+plot<- tsplot+tsdplot+plot_layout(guides="collect")
 
 #----------------------------------------
 # Check for stationarity
@@ -754,64 +1042,242 @@ CCF(pre_icarba, carbapenem, gmneg_all_bsi, lag_max=24) %>% autoplot(level=95)
 CCF(pre_icarba_ed2, carbapenem_diff, gmneg_diff, lag_max=24)%>% autoplot(level=95)
 
 # Identify an ARIMAX model for carbapenems 
-carba_pre1 <- pre_icarba %>% model(ARIMA(carbapenem~ -1 + pdq(1,1,0)+PDQ(0,0,0)+lag(gmneg_all_bsi,2)))
+carba_pre1 <- pre_icarba %>% model(ARIMA(carbapenem~ -1 + pdq(1,1,2)+PDQ(0,0,0)+lag(gmneg_all_bsi,2)))
 report(carba_pre1)
 carba_pre1 %>%  gg_tsresiduals() 
 
-carba_pre2 <- pre_icarba_ed2 %>% model(ARIMA(carbapenem  ~ -1 + pdq(1,1,0)+PDQ(0,0,0)+lag(gmneg_diff,2)))
-report(carba_pre2)
-carba_pre2 %>%  gg_tsresiduals() 
-
-# Looking at the correlation between gm neg BSI and differenced gm neg BSI (y-axis)
-gmneg_bsi<- pre_icarba$gmneg_all_bsi[1:71]
-differenced_gm_negbsi <- pre_icarba$gmneg_diff [2:72]
-gmneg <- cbind(gmneg_bsi,differenced_gm_negbsi )
-gmneg <-gmneg %>% as_tibble()
-cor(gmneg$gmneg_bsi, gmneg$differenced_gm_negbsi)
-ggplot(gmneg, aes(gmneg_bsi,differenced_gm_negbsi))+geom_point()
 
 
-CCF(ts_p3, difference(cephs),
+
+#cephs
+ts_p3  %>% CCF( difference(cephs),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(cephs),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(cephs, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-
-CCF(ts_p3, difference(cephs),
+# fq
+ts_p3  %>% CCF( difference(fq),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(fq),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(fq, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-CCF(ts_p3, difference(fq),
+# pseudo_ceph
+ts_p3  %>% CCF( difference(pseudo_3gc),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(pseudo_3gc),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(pseudo_3gc, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-CCF(ts_p3, difference(pseudo_3gc),
+# other monitor antibiotics
+ts_p3  %>% CCF( difference(other_monitor_abx),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(other_monitor_abx),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(other_monitor_abx, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-CCF(ts_p3, difference(other_monitor_abx),
+# all noncarbapenem antibiotics
+ts_p3  %>% CCF( difference(noncarb),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(noncarb),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(noncarb, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-CCF(ts_p3, difference(all_monitor_abx),
+# all antibiotics
+ts_p3  %>% CCF(difference(all_monitor_abx),
     difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(difference(all_monitor_abx),
+    gmneg_all_clinical, lag_max=24) %>% autoplot(level=95)
+ts_p3  %>% CCF(all_monitor_abx, gmneg_all_clinical, lag_max=24) %>% 
+  autoplot(level=95)
 
-CCF(ts_p3, difference(noncarb),
-    difference(gmneg_all_clinical), lag_max=24) %>% autoplot(level=95)
+
+tswide_clean %>% CCF(crkp_all_clinical, import_crkp_bc) %>% autoplot()
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+#----------------------------------------------
+### CRPa clinical population interactions
+#---------------------------------------------
+
+# a) Whole study period
+#-----------------------
+### 1. CRPa HCA all and co-not-HCA all
+# CCF
+tswide_clean %>% CCF(difference(crpa_hca_all_bc), 
+  (difference(crpa_conothca_any))) %>% 
+  autoplot() # No obvious relationship
+
+va<-c("crpa_conothca_any", "crpa_hca_all_bc")
+sumstats_allstudy %>% dplyr::filter(outcome==vars) %>% 
+  dplyr::select(kpss_pvalue, pp_pvalue, ndiffs,nsdiffs)
+
+# 2. CRPa HCA clinical and co-not-HCA all
+tswide_clean %>% CCF(
+  difference(crpa_hca_clinical_bc), 
+  crpa_conothca_any) %>% 
+  autoplot() # No obvious relationship
+
+# ARIMAX
+arimax_1 <- tswide_clean %>% model(
+  ARIMA(crpa_hca_all_bc ~ 1 + pdq(1,0,1)+
+          lag(difference(crpa_conothca_any),1))) %>% report() 
+arimax_1 %>% gg_tsresiduals() 
+
+X<-ts_post2 %>% as_tibble() %>% dplyr::select(crpa_ho_any_bc, import_crpa) %>% as.matrix()
+
+eval_var2(X,ir_CUM=F, force.degree=c(0,0))
+
+# 3. CRPa HCA clinical and co-not-HCA clinical
+tswide_clean %>% CCF(
+  crpa_hca_clinical_bc, 
+  crpa_conothca_clinical_bc) %>% 
+  autoplot() # No obvious relationship
+
+# 4. CRPa Ho all and co-not-HCA all 
+tswide_clean %>% CCF(
+  crpa_ho_any_bc, 
+  crpa_conothca_any_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 5. CRPa Ho clinical and co-not-HCA all 
+tswide_clean %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_conothca_any_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 6. CRPa Ho clinical and co-not-HCA clinical 
+tswide_clean %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_conothca_clinical_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 7. CRPa Ho all and co-HCA all 
+tswide_clean %>% CCF(
+  difference(crpa_ho_any_bc), 
+  crpa_cohca_any_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 8. CRPa Ho clinical and co-HCA all 
+tswide_clean %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_cohca_any_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 9. CRPa Ho clinical and co-HCA clinical
+tswide_clean %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_cohca_clinical_bc) %>% 
+  autoplot() # ?Reverse relationship (cohca- follows ho- after ~7m)
+
+# 10. CRPa Ho clinical and community combined importation pr (unweighted)
+tswide_clean %>% CCF(
+  crpa_ho_clinical_bc, 
+  import_crpa) %>% 
+  autoplot() # ?Reverse relationship (cohca- follows ho- after ~7m)
+
+
+# 11. CRPa Ho clinical and community combined importation pr (weighted)
+tswide_clean %>% CCF(
+  crpa_ho_clinical, 
+  crpa_coimport_tf) %>% 
+  autoplot() # ?Reverse relationship (cohca- follows ho- after ~7m)
+
+tswide_clean %>% CCF(
+  crpa_ho_clinical, 
+  crpa_coimport_w) %>% 
+  autoplot() # ?Reverse relationship (cohca- follows ho- after ~7m)
 
 
 
-CCF(ts_p3, difference(cephs),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
 
-CCF(ts_p3, difference(fq),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
+# a) From targeted screening onwards (ts_post2 dataset)
+#-----------------------
+# 1. CRPa HCA all and co-not-HCA all
+ts_post2 %>% CCF(
+  crpa_hca_all_bc, 
+  crpa_conothca_any, lag_max=24) %>% 
+  autoplot() ## bidirectional (lags 1) and contemporaneous associations
 
-CCF(ts_p3, difference(pseudo_3gc),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
 
-CCF(ts_p3, difference(other_monitor_abx),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
+# 2. CRPa HCA clinical and co-not-HCA all
+ts_post2 %>% CCF(
+  crpa_hca_clinical_bc, 
+  crpa_conothca_any, lag_max=24) %>% 
+  autoplot() # co-not-HCA predicted hca clinical (lag1) & contemporaneous
 
-CCF(ts_p3, difference(all_monitor_abx),
-    difference(ecoli_esbl_all_clinical), lag_max=24) %>% autoplot(level=95)
+# 3. CRPa HCA clinical and co-not-HCA clinical
+ts_post2 %>% CCF(
+  crpa_hca_clinical_bc, 
+  crpa_conothca_clinical_bc, lag_max=24) %>% 
+  autoplot() # No obvious relationship (??lag 7 from HCA --> notHCA)
 
-CCF(ts_p3, difference(ecoli_esbl_all_clinical), difference(carbapenem),
-    lag_max=24) %>% autoplot(level=95)
+# 4. CRPa Ho all and co-not-HCA all 
+ts_post2 %>% CCF(
+  crpa_ho_any_bc, 
+  crpa_conothca_any_bc, lag_max=24) %>% 
+  autoplot() # contemporaneous relationship
+
+# 5. CRPa Ho clinical and co-not-HCA all 
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_conothca_any_bc) %>% 
+  autoplot() # co-not-HCA predicted ho clinical (lag1)
+
+# 6. CRPa Ho clinical and co-not-HCA clinical 
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_conothca_clinical_bc) %>% 
+  autoplot() # ho-clinical predicted co-not-HCA clinical after 7m
+
+# 7. CRPa Ho all and co-HCA all 
+ts_post2 %>% CCF(
+  crpa_ho_any_bc, 
+  crpa_cohca_any_bc) %>% 
+  autoplot() # ho predicted co-HCA (lags 1-2)
+
+# 8. CRPa Ho clinical and co-HCA all 
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_cohca_any_bc) %>% 
+  autoplot() # No obvious relationship in either direction
+
+# 9. CRPa Ho clinical and co-HCA clinical
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_cohca_clinical_bc) %>% 
+  autoplot() # ho predicted co-HCA (lag 7)
+
+# 10. CRPa Ho clinical and community combined importation pr (unweighted)
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  import_crpa) %>% 
+  autoplot() # combined co importation predicted clinical bc (lag 1)
+
+
+# 11. CRPa Ho clinical and community combined importation pr (weighted)
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_coimport_tf, lag_max=24) %>% 
+  autoplot() # ho predicts co
+
+ts_post2 %>% CCF(
+  crpa_ho_clinical_bc, 
+  crpa_coimport_w, lag_max=24) %>% 
+  autoplot() # ?Reverse relationship (cohca- follows ho- after ~7m)
+
+
+
+
 
 
 ```
@@ -866,6 +1332,19 @@ auto.arima(difference(ts_p2$carbapenem),
            allowmean=TRUE,
            max.q = 0, 
            xreg = cbind(lag(difference(ts_p2$gmneg_all_bsi),2)))
+
+
+
+ts %>%
+    plot_acf_diagnostics(.date_var= date,
+                         .value= difference(ddd),
+                         .lags=18, 
+                         .interactive = F,
+                         .line_alpha=0.5,
+                         .line_color="steelblue",
+                         .white_noise_line_color="red",
+                         .white_noise_line_type=1,
+                         .point_color="steelblue")
 
 
 arimax_carbapenem <-Arima(ts_p2$carbapenem, order = c(1,1,0), include.drift = FALSE)
@@ -939,209 +1418,27 @@ In particular we examined sub-systems as follows:
 5.3. Within-species (CSO vs. CRO) competition
 5.4  Relations between CRO burdens in HO-HCA, CO-HCA, and CO-non-HCA
 5.5  Relations between importation pressure and CRO burdens
-## 5.1 Define functions for VAR
-```{r}
-
-eval_var<-function(y, series, names){
-
-  # Make series to be stationary
- 
-dy=0; dseries=0
-
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(series), alpha=0.05)!=0){dseries<-unitroot_ndiffs(ts(series), alpha=0.05); series<-diff(ts(series), differences=dseries)}
-
-if(dy>dseries){series<-head(series,-I(dy-dseries))}
-if(dy<dseries){y<-head(y,-I(dseries-dy))}    
-
-assign(names[1],y)
-assign(names[2],series)
-
-  # Select order and estimate VAR
-matrix<-cbind(y,series)
-colnames(matrix)<-names
-
-var.fit <- vars::VAR(matrix,lag.max = 2, type=c("none"))
-summary(var.fit)
-  # Some test form var estimation
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-
-   # Impulse response function
-
-impulse.response <- vars::irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forecasts
-
-var.decomp<-fevd(var.fit)
-
-  # causality analysis
-
-causality<- list(cause.y=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger, cause.series=causality(var.fit, cause=names[2], boot=TRUE, boot.runs=1000)$Granger)
-
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-
-
-
-eval_var3<-function(x,y,z,names){
-
-
-  # Make series to be stationary
- 
-dx=0; dy=0 ; dz=0
-if(unitroot_ndiffs(ts(x), alpha=0.05)!=0){dx<-unitroot_ndiffs(ts(x), alpha=0.05);x<-diff(ts(x), differences=dx)}
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(z), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(z), alpha=0.05);z<-diff(ts(z), differences=dz)}
-
-maxd<-max(dx,dy,dz)
-
-if(dx<maxd){x<-head(x,-I(maxd-dx))}
-if(dy<maxd){y<-head(y,-I(maxd-dy))}    
-if(dz<maxd){z<-head(z,-I(maxd-dz))}    
-
-
-assign(names[1],x)
-assign(names[2],y)
-assign(names[3],z)
-
-  # Select order and estimate VAR
-matrix<-cbind(x,y,z)
-colnames(matrix)<-names
-
-var.fit <- VAR(matrix, lag.max =2)
-
-  # Some test form var estimation
-
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-   
-  # Impulse response function
-
-impulse.response <- irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forescats
-
-var.decomp<-fevd(var.fit)
-
-# causality analisys
-
-causality<- list(
-  cause.x=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger,
-  cause.y=causality(var.fit,  cause=names[2],boot=TRUE, boot.runs=1000)$Granger,
-  cause.z=causality(var.fit,  cause=names[3],boot=TRUE, boot.runs=1000)$Granger)
- 
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-
-eval_var4<-function(x,y,z,zz,names){
-
-
-  # Make series to be stationary
- 
-dx=0; dy=0 ; dz=0; dzz=0
-if(unitroot_ndiffs(ts(x), alpha=0.05)!=0){dx<-unitroot_ndiffs(ts(x), alpha=0.05);x<-diff(ts(x), differences=dx)}
-if(unitroot_ndiffs(ts(y), alpha=0.05)!=0){dy<-unitroot_ndiffs(ts(y), alpha=0.05);y<-diff(ts(y), differences=dy)}
-if(unitroot_ndiffs(ts(z), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(z), alpha=0.05);z<-diff(ts(z), differences=dz)}
-if(unitroot_ndiffs(ts(zz), alpha=0.05)!=0){dz<-unitroot_ndiffs(ts(zz), alpha=0.05);zz<-diff(ts(zz), differences=dzz)}
-
-
-maxd<-max(dx,dy,dz,dzz)
-
-if(dx<maxd){x<-head(x,-I(maxd-dx))}
-if(dy<maxd){y<-head(y,-I(maxd-dy))}    
-if(dz<maxd){z<-head(z,-I(maxd-dz))}    
-if(dzz<maxd){zz<-head(zz,-I(maxd-dzz))}    
-
-assign(names[1],x)
-assign(names[2],y)
-assign(names[3],z)
-assign(names[4],zz)
-
-  # Select order and estimate VAR
-matrix<-cbind(x,y,z,zz)
-colnames(matrix)<-names
-
-var.fit <- VAR(matrix, lag.max =2)
-
-  # Some test form var estimation
-
-serial.test<-serial.test(var.fit, lags.pt=10, type="PT.asymptotic")
-
-normality.test <- normality.test(var.fit)
-
-var.stability <- stability(var.fit, type = "Rec-CUSUM")
-   
-  # Impulse response function
-
-impulse.response <- irf(var.fit , n.ahead = 6, ortho = TRUE,
-               cumulative = F, boot = TRUE, ci = 0.95, runs = 100)
-
-  # Variance decomposition of the forescats
-
-var.decomp<-fevd(var.fit)
-
-# causality analisys
-
-causality<- list(
-  cause.x=causality(var.fit,  cause=names[1],boot=TRUE, boot.runs=1000)$Granger,
-  cause.y=causality(var.fit,  cause=names[2],boot=TRUE, boot.runs=1000)$Granger,
-  cause.z=causality(var.fit,  cause=names[3],boot=TRUE, boot.runs=1000)$Granger,  
-  cause.zz=causality(var.fit,  cause=names[4],boot=TRUE, boot.runs=1000)$Granger)
- 
-
-return(
-  list(
-    var.fit=var.fit,
-    causality=causality,
-    impulse.response=impulse.response,
-    serial.test=serial.test,
-    normality.test=normality.test,
-    var.stability=var.stability,
-    var.decomp=var.decomp
-    )
-  )
-}
-
-```
 
 ## 5.1 Gram-Negative infections and antibiotic use
+### 5.1.1 GN and Carbapenem
 ```{r}
+# 
+va<-c("carbapenem", "ecoli_esbl_all_clinical")
+sumstats_allstudy %>% dplyr::filter(outcome==va) %>% 
+  dplyr::select(kpss_pvalue, pp_pvalue, ndiffs,nsdiffs)
 
+X<-ts_p2 %>% as_tibble() %>% dplyr::select(va) %>% as.matrix()
 
+ts_p2 %>% CCF(difference(carbapenem), difference(ecoli_esbl_all_clinical)) %>% autoplot()
 
+eval_var2(X,ir_CUM=F, force.degree=NULL)
+
+eval_var2(X,ir_CUM=F, force.degree=NULL, force.p=NULL, Amat=NULL, Bmat=NULL)
+
+gmneg_allabx<- tswide_clean %>% as_tibble() %>%
+  dplyr::select(import_crkp, crkp_all_clinical) %>% as.matrix()
+gmneg_allabx_stability <- var_stability(gmneg_allabx, periods=12)
+eval_var2()
 ```
 
 ## 5.1 Gram-Negative infections and antibiotic use
